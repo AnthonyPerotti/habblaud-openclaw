@@ -10,8 +10,8 @@ services:
     ports:
       - "${HABBLAUD_BIND:-0.0.0.0}:${HABBLAUD_PORT:-4747}:4747"
     volumes:
-      # Monta o diretório de dados do OpenClaw em modo somente leitura
-      - "${OPENCLAW_DATA_DIR:-~/.openclaw}:/openclaw:ro"
+      # Caminho absoluto dos dados do OpenClaw no host ZimaOS montado em modo somente leitura
+      - "${OPENCLAW_DATA_DIR:-/DATA/AppData/openclaw}:/openclaw:ro"
       - habblaud-data:/data
     environment:
       OPENCLAW_HOME: /openclaw
