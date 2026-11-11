@@ -22,6 +22,12 @@ export interface ServerConfig {
   home: string;
   /** Config dirs do Claude Code observados (um por conta). */
   claudeDirs: string[];
+  /** Diretório de dados do OpenClaw (OPENCLAW_HOME ou /openclaw em Docker). */
+  openclawHome: string;
+  /** URL do Gateway do OpenClaw (ex.: http://openclaw:18789 ou http://127.0.0.1:18789). */
+  openclawGatewayUrl?: string;
+  /** Token de autenticação do Gateway OpenClaw. */
+  openclawGatewayToken?: string;
   /** Onde o Habblaud guarda o próprio estado (nomes persistidos). */
   dataDir: string;
   /**
@@ -238,6 +244,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: string[] 
     inDocker,
     home,
     claudeDirs: discoverClaudeDirs(env, home),
+    openclawHome: resolve(env.OPENCLAW_HOME?.trim() || env.OPENCLAW_DIR?.trim() || env.OPENCLAW_STATE_DIR?.trim() || (inDocker ? '/openclaw' : join(home, '.openclaw'))),
+    openclawGatewayUrl: env.OPENCLAW_GATEWAY_URL?.trim() || undefined,
+    openclawGatewayToken: env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined,
     dataDir: resolve(env.HABBLAUD_DATA_DIR?.trim() || (inDocker ? '/data' : join(home, '.habblaud'))),
     usageDir: resolve(env.HABBLAUD_USAGE_DIR?.trim() || join(home, '.habblaud', 'usage')),
     allowedHosts: parseAllowedHosts(env.HABBLAUD_ALLOWED_HOSTS),

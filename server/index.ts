@@ -34,6 +34,7 @@ import { createMessageRoutes } from './messages/http';
 import { MessageRegistry } from './messages/registry';
 import type { CodexLive } from './sources/codex/live';
 import { ClaudeWatcher } from './sources/watcher';
+import { OpenClawSource } from './sources/openclaw/source';
 import { discoverCodexDirs } from './sources/codex/accounts';
 import { CodexHistory } from './sources/codex/history';
 import { CodexSource } from './sources/codex/source';
@@ -130,17 +131,17 @@ const office = new Office({
   updates: () => updates.status(),
   world: () => world?.meta() ?? { enabled: false, configured: false, state: 'off' },
 });
-// Fontes de agentes, uma por ferramenta (sources/source.ts): a do Claude Code e, depois dela, a do Codex (quando há
-// pastas do Codex; HABBLAUD_CODEX=0 desliga), com o histórico dela no HistorySet abaixo e as contas registradas por
-// ela mesma (accounts.setProviderAccounts). `codex` também recebe os eventos dos hooks do Codex (CodexLive).
-const claude = new ClaudeWatcher({ accounts, office, inDocker: config.inDocker });
-const agents = new SourceSet([claude]);
-const codexDirs = config.codex ? discoverCodexDirs(process.env, config.home) : [];
-const codex = codexDirs.length ? new CodexSource({ accounts, office, dirs: codexDirs, env: process.env, home: config.home }) : undefined;
-if (codex) agents.add(codex);
-// Eventos dos hooks do Codex (POST /api/codex/events, mod/habblaud-codex/hook.mjs): vão para a fonte do Codex ao vivo
-// (CodexLive); sem ela (nenhuma pasta do Codex ou HABBLAUD_CODEX=0) a rota responde {ok: false}.
-const codexLive: CodexLive | undefined = codex;
+// Fonte de agentes exclusiva: OpenClaw (observa SQLite e estado em OPENCLAW_HOME).
+const openclaw = new OpenClawSource({
+  openclawHome: config.openclawHome,
+  gatewayUrl: config.openclawGatewayUrl,
+  gatewayToken: config.openclawGatewayToken,
+  accounts,
+  office,
+});
+const agents = new SourceSet([openclaw]);
+const codex = undefined;
+const codexLive: CodexLive | undefined = undefined;
 late.office = office;
 late.agents = agents;
 // Página que pode responder pelo escritório: Host local na porta local; na remota, só com permissions liberado.
@@ -191,13 +192,11 @@ if (worldUplink && worldSocial) {
 const terminals = config.terminal
   ? new TerminalStreams({ office, transcriptPathOf: (id) => agents.transcriptPathOf(id), parserFor: (id) => agents.parserFor(id) })
   : undefined;
-// Histórico do terminal (sessões recentes, abertas ou encerradas, de todas as ferramentas): mesma trava.
+// Histórico do terminal (sessões recentes do OpenClaw): mesma trava.
 const history = config.terminal
-  ? new HistorySet([new SessionHistory({ accounts: () => accounts.entries(), openAgentOf: (acc, sid) => openMainAgent(office.list(), acc, sid) })])
+  ? new HistorySet([openclaw.history])
   : undefined;
-if (history && codex) history.add(new CodexHistory({ accounts: () => accounts.entriesOf('codex'), openAgentOf: (acc, sid) => openMainAgent(office.list(), acc, sid) }));
-// Entregas: o fim de cada pedido, lido dos transcripts do histórico (mesma trava do terminal). Os arquivos entregues
-// são lidos aqui (Node, ou pasta de conta montada no Docker) ou pelo auxiliar do host.
+// Entregas: o fim de cada pedido, lido dos transcripts do histórico (mesma trava do terminal).
 const deliveries = history
   ? new DeliveryIndex({
       sessions: () => history.list(),
@@ -228,15 +227,13 @@ const deliveryFiles = deliveries
 const timelineDir = join(config.dataDir, TIMELINE_DIR);
 const timeline = config.timeline ? new TimelineRecorder({ dir: timelineDir }) : undefined;
 if (timeline) hub.onSnapshot((snap) => timeline.ingest(snap));
-// Responder pelo escritório (hook PermissionRequest): age sobre as sessões, então segue a mesma trava.
+// Responder pelo escritório (permissões e interações): age sobre as sessões.
 const permissions = config.terminal
   ? new PermissionRegistry({
       office,
       viewers: () => hub.localSize,
       answerLater: () => !!config.remote?.allow.has('permissions'),
-      // Só o Claude Code: a busca da resposta dada no terminal lê o formato do transcript dele.
-      transcriptPathOf: (id) => claude.transcriptPathOf(id),
-      // Pedidos do hook do Codex: a conta pela pasta CODEX_HOME que ele manda.
+      transcriptPathOf: (id) => openclaw.transcriptPathOf(id),
       codexAccount: (account, codexHome) => codexAccountOf(accounts.entriesOf('codex'), account, codexHome),
       demoDecide: (id, d) => office.decideDemoPermission(id, d),
       demoDetail: (id) => office.demoPermission(id),
@@ -470,26 +467,13 @@ if (config.remote) {
 
 server.listen(config.port, config.host, () => {
   const host = config.host === '0.0.0.0' || config.host === '::' ? 'localhost' : config.host;
-  log.info(tr('🏢 Habblaud {0}{1}{2} em http://{3}:{4}', [config.version, config.dev ? ' (dev)' : '', config.inDocker ? ' (docker)' : '', host, config.port]));
-  const list = accounts.entries();
-  if (!list.length) log.warn(tr('Nenhuma pasta do Claude Code encontrada (defina HABBLAUD_CLAUDE_DIRS).'));
-  for (const dir of codexDirsRefused(process.env, config.home)) {
-    log.warn(tr('{0} é uma pasta do Codex, não do Claude Code: fica fora das contas do Claude Code.', [dir]));
+  log.info(tr('🏢 Habblaud (OpenClaw) {0}{1}{2} em http://{3}:{4}', [config.version, config.dev ? ' (dev)' : '', config.inDocker ? ' (docker)' : '', host, config.port]));
+  log.info(`   OpenClaw: monitorando ${config.openclawHome}`);
+  if (config.openclawGatewayUrl) {
+    log.info(`   OpenClaw Gateway: ${config.openclawGatewayUrl}`);
   }
-  for (const a of list) {
-    const src = agents.sources().find((s) => s.label === a.id);
-    const usage = accounts.usageView(a.id).status;
-    log.info(tr('   Conta {0} ({1}): {2} sessão(ões) aberta(s) · uso: {3} · {4}', [a.detected.short, a.id, src?.sessions ?? 0, usage, a.dir]));
-  }
-  if (codex) {
-    const codexAccounts = codex.accountEntries();
-    const open = codex.sources().reduce((n, s) => n + s.sessions, 0);
-    log.info(tr('   Codex: {0} conta(s), {1} sessão(ões) aberta(s).', [codexAccounts.length, open]));
-    for (const a of codexAccounts) {
-      log.info(tr('   Conta {0} do Codex ({1}): uso: {2} · {3}', [a.detected.short, a.id, accounts.usageView(a.id).status, a.detected.configDir]));
-    }
-  } else {
-    log.info(tr('   Codex: {0}.', [config.codex ? tr('nenhuma pasta do Codex encontrada (defina HABBLAUD_CODEX_DIRS)') : tr('desligado (HABBLAUD_CODEX=0)')]));
+  for (const a of accounts.entries()) {
+    log.info(`   Conta ${a.detected.short} (${a.id}): ${a.detected.name} · ${a.detected.plan ?? ''}`);
   }
   if (office.isDemo()) log.info(tr('   Modo demonstração ligado (agentes simulados misturados aos reais).'));
   if (config.terminal) log.info(tr('   Terminal: ligado (acesso só local).'));

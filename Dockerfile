@@ -33,15 +33,15 @@ ENV NODE_ENV=production \
     HABBLAUD_PORT=4747 \
     HABBLAUD_IN_DOCKER=1 \
     HABBLAUD_DATA_DIR=/data \
-    HABBLAUD_USAGE_DIR=/usage
+    OPENCLAW_HOME=/openclaw
 
 WORKDIR /app
 
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/dist ./dist
 
-# Estado do Habblaud (nomes persistidos). O volume nomeado herda este dono na primeira montagem.
-RUN mkdir -p /data && chown node:node /data
+# Estado do Habblaud e diretório de montagem do OpenClaw
+RUN mkdir -p /data /openclaw && chown node:node /data
 
 # Usuário sem privilégios (já existe na imagem oficial do Node). O código fica com dono root,
 # então o processo não consegue alterá-lo; só /data é gravável.

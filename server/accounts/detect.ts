@@ -211,6 +211,10 @@ function scanClaudeDirs(env: NodeJS.ProcessEnv, home: string): { dirs: string[];
 const ALIAS_RE = /^\s*alias\s+([A-Za-z0-9_][A-Za-z0-9_.-]*)=(?:'([^']*)'|"((?:[^"\\]|\\.)*)")\s*(?:#.*)?$/;
 /** O que identifica o alias de cada ferramenta: o comando invocado e a variável com a pasta da conta. */
 const ALIAS_TOOLS: Record<Provider, { invokes: RegExp; dir: RegExp }> = {
+  openclaw: {
+    invokes: /(?:^|[\s;&|(])(?:[\w.~/-]*\/)?openclaw(?=$|[\s;&|)])/,
+    dir: /\bOPENCLAW_HOME=(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/,
+  },
   claude: {
     invokes: /(?:^|[\s;&|(])(?:[\w.~/-]*\/)?claude(?=$|[\s;&|)])/,
     dir: /\bCLAUDE_CONFIG_DIR=(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/,
