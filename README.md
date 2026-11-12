@@ -168,6 +168,7 @@ services:
   habblaud:
     build: .
     image: habblaud:openclaw
+    container_name: habblaud
     restart: unless-stopped
     ports:
       - "4747:4747"
@@ -197,6 +198,7 @@ services:
 
 volumes:
   habblaud-data:
+    name: habblaud-data
 ```
 
 ### Start the Container
