@@ -57,7 +57,7 @@ export class CharacterEditor {
         this.fields.preview,
         h('div', { class: 'ui-char__head' }, h('label', { class: 'ui-char__label' }, h('span', { text: tr('Nome') }), this.nameInput), roll),
       ),
-      h('p', { class: 'ui-muted ui-small', text: tr('Vale para o projeto: a próxima sessão nesta sala chega com este personagem.') }),
+      h('p', { class: 'ui-muted ui-small ui-char__hint', text: tr('Vale para o projeto: a próxima sessão nesta sala chega com este personagem.') }),
       this.fields.groups,
       this.error,
       h('div', { class: 'ui-char__actions' }, this.saveBtn, cancel, this.resetBtn),
@@ -86,6 +86,9 @@ export class CharacterEditor {
       if (!live || a.status === 'offline') this.ctx.announce(tr('O agente saiu do escritório.'));
     }
     if (this.editing && !this.confirmingReset) setHidden(this.resetBtn, !a.custom);
+    // Dica: subagentes têm personagem por sessão (não persiste na sala).
+    const hint = this.el.querySelector<HTMLParagraphElement>('.ui-char__hint');
+    if (hint) setText(hint, a.kind === 'sub' ? tr('Vale para esta sessão do subagente.') : tr('Vale para o projeto: a próxima sessão nesta sala chega com este personagem.'));
   }
 
   private start(): void {

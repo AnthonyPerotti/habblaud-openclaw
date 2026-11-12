@@ -10,6 +10,10 @@ do meio (0.**3**.0).
 
 ## [Não lançado]
 
+### Adicionado
+
+- **Edição de personagem para subagentes.** Agora é possível customizar a aparência e o nome dos subagentes no painel de detalhes do agente (lápis ao lado do nome). Diferente dos agentes principais (cujo personagem fica gravado para o projeto/sala), a customização do subagente é mantida na sessão atual sem interferir na sala do projeto.
+
 ### Corrigido
 
 - **[OpenClaw P0-1] Escritório vazio após atualização do OpenClaw 2026.11.x.** O schema da tabela

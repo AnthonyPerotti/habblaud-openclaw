@@ -584,13 +584,21 @@ describe('Office: personagem do projeto', () => {
     });
   });
 
-  it('subagente, demo, quem está saindo e id desconhecido: not-found', () => {
-    const { office, now } = makeOffice();
+  it('subagente: edita só a sessão dele (sem mexer na sala); demo, quem está saindo e id desconhecido: not-found', () => {
+    const { office, names, now } = makeOffice();
     office.addMain(main('acc:1', 's1', '/p/api', now()));
-    office.addSub({ id: 's1:sub', parentId: 'acc:1', sessionId: 's1', role: 'Explore', background: false, startedAt: now() });
+    office.addSub({ id: 's1:sub', parentId: 'acc:1', sessionId: 'sub-sess', role: 'Explore', background: false, startedAt: now() });
     office.setDemo(true);
     const demo = office.commit().snapshot.agents.find((a) => a.id.startsWith('demo:'))!;
-    for (const id of ['s1:sub', demo.id, 'nao-existe']) {
+    // subagente: editável
+    expect(office.setCharacter('s1:sub', { name: 'Robô', seed: 7, parts: {} })).toEqual({ result: 'ok' });
+    expect(office.get('s1:sub')).toMatchObject({ name: 'Robô', seed: 7, custom: true });
+    // subagente: a sala NÃO ganha o personagem
+    expect(names.character('/p/api')).toBeUndefined();
+    expect(office.resetCharacter('s1:sub')).toBe('ok');
+    expect(office.get('s1:sub')!.custom).toBeUndefined();
+    // ids inválidos continuam not-found
+    for (const id of [demo.id, 'nao-existe']) {
       expect(office.setCharacter(id, { name: 'Zé', seed: 1, parts: {} })).toEqual({ result: 'not-found' });
       expect(office.resetCharacter(id)).toBe('not-found');
     }

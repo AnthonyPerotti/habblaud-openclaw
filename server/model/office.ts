@@ -823,9 +823,13 @@ export class Office {
 
   // ---------------------------------------------------------------- personagem do projeto (editor)
 
-  /** Escolhe nome e aparência do agente principal `id` e grava como o personagem da sala dele. */
+  /**
+   * Escolhe nome e aparência do agente `id`.
+   * - Principal: grava também como o personagem da sala (válido para a próxima sessão no mesmo projeto).
+   * - Subagente: grava apenas para esta sessão (via names.remember); não afeta a sala.
+   */
   setCharacter(id: string, input: CharacterInput): CharacterResult {
-    const rec = this.editable(id);
+    const rec = this.editableAny(id);
     if (!rec) return { result: 'not-found' };
     const info = rec.info;
     // Quem está saindo conta aqui: ao reabrir dentro do período de graça, ele volta com o nome dele.
@@ -833,15 +837,20 @@ export class Office {
     if (conflict) return { result: 'conflict', message: conflict };
     const before = info.name;
     const parts = Object.keys(input.parts).length ? { ...input.parts } : undefined;
-    // Outro principal da sala que estava com o personagem continua com o nome atual, agora guardado como o da sessão
-    // dele: depois de um reinício, cada sessão volta quem era, e não com o personagem que esta salvou.
-    for (const r of this.agents.values()) {
-      const o = r.info;
-      if (o.id === id || o.kind !== 'main' || o.roomId !== info.roomId || !o.custom) continue;
-      this.deps.names.remember(o.sessionId, { name: o.name, look: o.look });
-      delete o.custom;
+    if (info.kind === 'main') {
+      // Outro principal da sala que estava com o personagem continua com o nome atual, agora guardado como o da sessão
+      // dele: depois de um reinício, cada sessão volta quem era, e não com o personagem que esta salvou.
+      for (const r of this.agents.values()) {
+        const o = r.info;
+        if (o.id === id || o.kind !== 'main' || o.roomId !== info.roomId || !o.custom) continue;
+        this.deps.names.remember(o.sessionId, { name: o.name, look: o.look });
+        delete o.custom;
+      }
+      this.deps.names.setCharacter(info.roomId, { name: input.name, look: info.look, seed: input.seed, ...(parts ? { parts } : {}), owner: info.sessionId });
+    } else {
+      // Subagente: apenas persiste o nome/look na sessão para restauração futura.
+      this.deps.names.remember(info.sessionId, { name: input.name, look: info.look });
     }
-    this.deps.names.setCharacter(info.roomId, { name: input.name, look: info.look, seed: input.seed, ...(parts ? { parts } : {}), owner: info.sessionId });
     info.name = input.name;
     info.seed = input.seed;
     if (parts) info.parts = parts;
@@ -855,15 +864,18 @@ export class Office {
   }
 
   /**
-   * "Voltar ao sorteio": o agente volta ao nome da sessão e à seed do id; a sala só perde o personagem se ele for desta
-   * sessão (o que outra sessão da sala salvou depois continua dela).
+   * "Voltar ao sorteio": o agente volta ao nome sorteado pela seed do id.
+   * - Principal: a sala também perde o personagem (se ele for o dono).
+   * - Subagente: apenas esquece o nome salvo na sessão.
    */
   resetCharacter(id: string): 'ok' | 'not-found' {
-    const rec = this.editable(id);
+    const rec = this.editableAny(id);
     if (!rec) return 'not-found';
     const info = rec.info;
-    const owner = this.deps.names.character(info.roomId)?.owner;
-    if (owner === undefined || owner === info.sessionId) this.deps.names.clearCharacter(info.roomId);
+    if (info.kind === 'main') {
+      const owner = this.deps.names.character(info.roomId)?.owner;
+      if (owner === undefined || owner === info.sessionId) this.deps.names.clearCharacter(info.roomId);
+    }
     if (info.custom) {
       const person = this.deps.names.assign(info.sessionId, this.takenNames(id));
       info.name = person.name;
@@ -876,10 +888,10 @@ export class Office {
     return 'ok';
   }
 
-  /** Agente principal real e presente (nem subagente, nem demo, nem saindo). */
-  private editable(id: string): AgentRecord | undefined {
+  /** Agente real e presente (principal ou sub), não saindo — para o editor de personagem. */
+  private editableAny(id: string): AgentRecord | undefined {
     const rec = this.agents.get(id);
-    return rec && rec.info.kind === 'main' && rec.removeAt === undefined ? rec : undefined;
+    return rec && rec.removeAt === undefined ? rec : undefined;
   }
 
   /**

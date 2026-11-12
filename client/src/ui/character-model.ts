@@ -18,11 +18,12 @@ export interface EditGate {
 }
 
 /**
- * O lápis "Editar personagem" aparece? Só para o principal real, ao vivo, que não está saindo (offline: o servidor
- * responderia 404) e com acesso local (a trava do terminal).
+ * O lápis "Editar personagem" aparece? Para qualquer agente real, ao vivo, que não está saindo
+ * (offline: o servidor responderia 404) e com acesso local (a trava do terminal). Subagentes
+ * também podem editar — a mudança vale só para esta sessão (o personagem não fica gravado na sala).
  */
 export function canEditCharacter(a: Pick<AgentInfo, 'id' | 'kind' | 'status'>, g: EditGate): boolean {
-  return a.kind === 'main' && a.status !== 'offline' && g.live && g.terminal && g.local && !g.replaying && !g.mock && !isDemoId(a.id);
+  return (a.kind === 'main' || a.kind === 'sub') && a.status !== 'offline' && g.live && g.terminal && g.local && !g.replaying && !g.mock && !isDemoId(a.id);
 }
 
 /** Peças que diferem da aparência sorteada pela seed (o que vai em `parts`), na ordem de PART_KEYS. */

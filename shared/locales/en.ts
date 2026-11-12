@@ -29,6 +29,7 @@ export const EN: Readonly<Record<string, string>> = {
   "Voltar ao sorteio": "Back to random",
   "Nome": "Name",
   "Vale para o projeto: a próxima sessão nesta sala chega com este personagem.": "Applies to the project: the next session in this room arrives as this character.",
+  "Vale para esta sessão do subagente.": "Applies to this subagent session.",
   "O agente saiu do escritório.": "The agent left the office.",
   "Dê um nome ao personagem.": "Give the character a name.",
   "Personagem salvo: {0}.": "Character saved: {0}.",

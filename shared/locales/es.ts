@@ -29,6 +29,7 @@ export const ES: Readonly<Record<string, string>> = {
   "Voltar ao sorteio": "Volver al sorteo",
   "Nome": "Nombre",
   "Vale para o projeto: a próxima sessão nesta sala chega com este personagem.": "Vale para el proyecto: la próxima sesión en esta sala llega con este personaje.",
+  "Vale para esta sessão do subagente.": "Vale para esta sesión del subagente.",
   "O agente saiu do escritório.": "El agente salió de la oficina.",
   "Dê um nome ao personagem.": "Ponle un nombre al personaje.",
   "Personagem salvo: {0}.": "Personaje guardado: {0}.",

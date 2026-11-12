@@ -1,4 +1,4 @@
-// Tradução para o francês. Chave = texto original em PT (exatamente como passado a tr()); valor = francês.
+﻿// Tradução para o francês. Chave = texto original em PT (exatamente como passado a tr()); valor = francês.
 // As lacunas {0}, {1}... (e as nomeadas, como {sala}) precisam aparecer na tradução, em qualquer ordem.
 // Chave ausente = o texto fica em PT. `npm run i18n:check` lista os textos sem tradução e as chaves que sobraram.
 export const FR: Readonly<Record<string, string>> = {
@@ -29,6 +29,7 @@ export const FR: Readonly<Record<string, string>> = {
   "Voltar ao sorteio": "Revenir au tirage au sort",
   "Nome": "Nom",
   "Vale para o projeto: a próxima sessão nesta sala chega com este personagem.": "S'applique au projet : la prochaine session dans cette salle arrivera avec ce personnage.",
+  "Vale para esta sessão do subagente.": "S'applique à cette session de sous-agent.",
   "O agente saiu do escritório.": "L'agent a quitté le bureau.",
   "Dê um nome ao personagem.": "Donnez un nom au personnage.",
   "Personagem salvo: {0}.": "Personnage enregistré : {0}.",
