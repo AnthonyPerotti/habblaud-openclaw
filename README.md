@@ -168,7 +168,6 @@ services:
   habblaud:
     build: .
     image: habblaud:openclaw
-    container_name: habblaud
     restart: unless-stopped
     ports:
       - "4747:4747"
