@@ -1,5 +1,5 @@
 // Reader for OpenClaw session SQLite database and state files.
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { gunzipSync, inflateSync } from 'node:zlib';
 import type { OpenClawSession, OpenClawSessionsPayload } from './types';
@@ -54,47 +54,43 @@ function decompressPayload(raw: unknown): string | null {
 }
 
 /**
- * Searches for openclaw SQLite databases in the OpenClaw state directory.
- * Standard locations:
- * - <openclawHome>/agents/<agentId>/agent/openclaw-agent.sqlite
- * - <openclawHome>/state/openclaw.sqlite
- * - <openclawHome>/openclaw.sqlite
+ * Searches for OpenClaw SQLite databases using targeted path discovery.
+ * Only reads the specific database files that OpenClaw is known to create:
+ * - <openclawHome>/openclaw.sqlite              (root db, legacy)
+ * - <openclawHome>/state/openclaw.sqlite         (state db)
+ * - <openclawHome>/agents/<id>/agent/openclaw-agent.sqlite  (per-agent db)
+ *
+ * Skips lock files, WAL auxiliaries, hidden dirs, tmp dirs, and unrelated files.
  */
 export function findOpenClawDatabases(openclawHome: string): string[] {
   const dbs = new Set<string>();
   if (!existsSync(openclawHome)) return [];
 
-  // Check known standard locations first
-  const known = [
+  // Root and state databases
+  const roots = [
     join(openclawHome, 'openclaw.sqlite'),
-    join(openclawHome, 'openclaw.db'),
     join(openclawHome, 'state', 'openclaw.sqlite'),
-    join(openclawHome, 'state', 'openclaw.db'),
   ];
-  for (const k of known) {
-    if (existsSync(k)) dbs.add(k);
+  for (const p of roots) {
+    if (existsSync(p)) dbs.add(p);
   }
 
-  // Scan directories up to depth 3
-  function scan(dir: string, depth: number) {
-    if (depth > 3) return;
+  // Per-agent databases: only the exact filename openclaw-agent.sqlite,
+  // never auxiliary lock/WAL/reindex files next to it.
+  const agentsDir = join(openclawHome, 'agents');
+  if (existsSync(agentsDir)) {
     try {
-      const entries = readdirSync(dir, { withFileTypes: true });
-      for (const e of entries) {
-        const full = join(dir, e.name);
-        if (e.isDirectory()) {
-          if (e.name === 'node_modules' || e.name === '.git') continue;
-          scan(full, depth + 1);
-        } else if (e.isFile() && (e.name.endsWith('.sqlite') || e.name.endsWith('.db'))) {
-          dbs.add(full);
-        }
+      const agents = readdirSync(agentsDir, { withFileTypes: true });
+      for (const a of agents) {
+        if (!a.isDirectory()) continue;
+        const dbPath = join(agentsDir, a.name, 'agent', 'openclaw-agent.sqlite');
+        if (existsSync(dbPath)) dbs.add(dbPath);
       }
     } catch {
-      // ignore
+      // ignore permission or IO errors
     }
   }
 
-  scan(openclawHome, 0);
   return Array.from(dbs);
 }
 
