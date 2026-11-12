@@ -18,7 +18,7 @@ describe('OpenClawSource full sync test', () => {
       {
         key: 'agent:main:dashboard:e98cd445-e9ca-47ea-92a9-4d4ce8a22468',
         sessionId: '05ab7c07-fad5-4564-a639-305ef068233b',
-        parentSessionKey: 'agent:main:main',
+        // No parentSessionKey: this is a top-level main agent.
         spawnDepth: 0,
         sessionStartedAt: Date.now() - 5000,
         lastInteractionAt: Date.now() - 1000,

@@ -28,8 +28,8 @@ export class OpenClawHistory implements HistoryProvider {
       const dbs = findOpenClawDatabases(this.openclawHome);
       const all: OpenClawSession[] = [];
       for (const db of dbs) {
-        const rows = await readSessionsFromDb(db);
-        all.push(...rows);
+        const result = await readSessionsFromDb(db);
+        all.push(...result.sessions);
       }
       if (all.length > 0) {
         this.cachedSessions = all;

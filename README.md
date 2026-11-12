@@ -233,6 +233,7 @@ When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 | `HABBLAUD_LANG` | UI language (`pt`, `en`, `es`, `fr`) | `pt` |
 | `HABBLAUD_DEMO` | Enable simulated demo agents | `0` |
 | `HABBLAUD_TERMINAL` | Enable agent terminal inspection | `1` |
+| `HABBLAUD_TRUST_PROXY` | Enable terminal and messages when behind a trusted local reverse proxy | Unset |
 | `HABBLAUD_WORLD` | Enable Habblaud World community uplink | `0` |
 
 ## Troubleshooting and Operations
@@ -259,6 +260,37 @@ If you see:
 
 - **Cause:** Calling only `setStatus('offline')` does not arm the garbage collection timestamp (`removeAt`).
 - **Fix:** When sessions are deleted from SQLite or the state index, `closeMain()` and `completeSub()` are called to schedule clean removal after the grace period.
+
+### Terminal and Messages Disabled in Docker (P2-1)
+
+By default, Habblaud only enables the terminal and direct messaging features when it detects
+that the port is not exposed on the LAN. With `HABBLAUD_BIND=0.0.0.0` (the Docker default),
+those features are blocked because the port is reachable from any device on your network.
+
+**Recommended setup: bind locally and put Nginx (or Caddy/Traefik) in front.**
+
+```yaml
+# docker-compose.yml excerpt
+services:
+  habblaud:
+    image: node:22-alpine
+    # Do NOT publish the port directly on the host LAN.
+    # Let the reverse proxy handle external access.
+    # ports:
+    #   - "4747:4747"
+    environment:
+      HABBLAUD_BIND: "127.0.0.1"   # listen only on the loopback inside the container
+      HABBLAUD_TRUST_PROXY: "1"    # tells Habblaud "a trusted proxy is in front, enable terminal"
+      HABBLAUD_ALLOWED_HOSTS: "habblaud.yourdomain.local"
+```
+
+Then configure your reverse proxy (running on the host or in another container on the same
+Docker network) to forward requests from `habblaud.yourdomain.local` to `http://habblaud:4747`.
+
+> **Important:** Only set `HABBLAUD_TRUST_PROXY=1` when the Habblaud port is not directly
+> reachable from outside the host. If you expose the port with `ports: ["4747:4747"]` and also
+> set `HABBLAUD_TRUST_PROXY=1`, the terminal and messages will be accessible to anyone on your
+> network who can reach the container port.
 
 ## Local Development
 

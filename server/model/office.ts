@@ -597,7 +597,12 @@ export class Office {
         return true;
       }
     }
-    const person = this.deps.names.assign(p.id, this.takenNames());
+    // P0-3: use sessionId as the name key so the character stays consistent when the
+    // same session alternates between 'main' and 'sub' (addMain also keys by sessionId).
+    // Fall back to p.id only when sessionId is absent or matches the parent's (sub riding
+    // the same session slot as its parent would otherwise collide).
+    const nameKey = p.sessionId && p.sessionId !== parent.info.sessionId ? p.sessionId : p.id;
+    const person = this.deps.names.assign(nameKey, this.takenNames());
     const info: AgentInfo = {
       id: p.id,
       kind: 'sub',

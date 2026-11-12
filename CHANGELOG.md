@@ -10,6 +10,66 @@ do meio (0.**3**.0).
 
 ## [Não lançado]
 
+### Corrigido
+
+- **[OpenClaw P0-1] Escritório vazio após atualização do OpenClaw 2026.11.x.** O schema da tabela
+  `session_nodes` mudou: a coluna `id` foi removida, a PK passou a ser `session_key` e o id da
+  sessão migrou para `current_session_id`. A query fixa `ORDER BY id DESC` estourava com
+  `no such column: id`, o `catch` externo engolia o erro silenciosamente e `readSessionsFromDb`
+  retornava `[]` — deixando o escritório vazio. A correção lê o `PRAGMA table_info` antes de
+  montar o `ORDER BY` (preferindo `updated_at`, com fallback para `id` e depois `rowid`) e
+  expande a leitura do session ID para incluir `current_session_id`. Testado com fixtures nos
+  dois schemas (antigo e novo).
+
+- **[OpenClaw P0-2] Subagente nunca entrava no escritório quando o principal ainda não estava
+  presente.** `addSub()` retorna `false` quando o `parentId` não está na sala, mas o agente
+  era marcado como ativo de qualquer jeito — então nas sincronizações seguintes caia no ramo
+  "já existe" e nunca era inserido. Corrigido: quando `addSub` retorna `false`, o agente não
+  é adicionado a `activeAgentIds` e a próxima passagem tenta novamente.
+
+- **[OpenClaw P0-3] Personagem trocado quando a mesma sessão alternava entre principal e
+  subagente.** `addMain` usava `sessionId` como chave do nome; `addSub` usava `p.id`
+  (`openclaw:<key>`). Como a mesma sessão pode ser lida com kinds diferentes em ciclos
+  consecutivos, o personagem sorteia dois nomes distintos. Corrigido: `addSub` agora usa
+  `sessionId` como chave de nome (caindo para `p.id` só quando `sessionId` coincide com o do
+  pai), alinhando com `addMain`.
+
+- **[OpenClaw P1-1] Falha de leitura do banco era invisível e permanente.** `warnOnce` emitia
+  o aviso uma única vez por processo; erros transitórios desapareciam do log e o
+  `/api/health` continuava reportando `ok: true`. Agora o log registra a transição
+  `ok → erro` e `erro → ok`, além de um lembrete a cada 10 minutos enquanto o banco
+  permanecer inacessível. `sources()` em `OpenClawSource` retorna um `SourceInfo` por banco,
+  com `ok: false` e `error` quando aplicável.
+
+- **[OpenClaw P1-2] WAL pendente era ignorado pelo modo `immutable=1`.** O fallback para
+  bind mount `:ro` abria o banco com `?immutable=1`, que por definição ignora o arquivo
+  `-wal` — o Habblaud lia o estado do último checkpoint, não o mais recente. Agora, quando
+  há um `-wal` mais novo que o `.sqlite`, o trio (`db`, `-wal`, `-shm`) é copiado para um
+  diretório temporário e aberto em modo normal (WAL preservado). O `immutable=1` continua
+  como último recurso, e o modo usado (`normal` | `wal-copy` | `immutable`) é registrado no
+  log quando diferente de `normal`.
+
+- **[OpenClaw P1-3] Subagente sem `spawnDepth` virava principal.** A condição
+  `isSub = Boolean(parentSessionKey && spawnDepth && spawnDepth > 0)` falhava quando
+  `spawnDepth` estava ausente do schema novo. Corrigido: a presença de `parentSessionKey`
+  (diferente da própria chave) é o critério primário; `spawnDepth > 0` é secundário. O
+  `spawnDepth` também é derivado na leitura do banco (`sqlite.ts`): `1` quando há
+  `parentSessionKey`, `0` quando não há, caso `entry_json` não traga o campo.
+
+- **[OpenClaw P1-4] Mesma sessão aparecia duas vezes quando presente em mais de um banco.**
+  `state/openclaw.sqlite` e `agents/main/agent/openclaw-agent.sqlite` podem conter a mesma
+  sessão; `sessions.push(...dbSessions)` para cada banco criava duplicatas. Corrigido:
+  deduplicação por `sessionId` após a mesclagem, mantendo o registro com `updatedAt` maior.
+
+### Adicionado
+
+- **[OpenClaw P2-1] `HABBLAUD_TRUST_PROXY=1`: terminal e mensagens com proxy reverso local.**
+  Em Docker com `HABBLAUD_BIND=0.0.0.0`, o terminal e as mensagens eram sempre desligados porque
+  a porta poderia estar exposta na LAN — sem caminho válido de habilitar. A nova variável
+  `HABBLAUD_TRUST_PROXY=1` declara que um proxy reverso local (Nginx, Caddy, Traefik) é o único
+  ponto de entrada: o container não deve publicar a porta diretamente. Documentado no README,
+  seção "Terminal and Messages Disabled in Docker", com exemplo de `docker-compose.yml`.
+
 ## [1.0.3] - 2026-10-16
 
 ### Corrigido

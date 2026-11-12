@@ -22,6 +22,14 @@ export interface OpenClawSourceOptions {
   pollIntervalMs?: number;
 }
 
+/** Per-database health state tracked for SourceInfo reporting (P1-1). */
+interface DbHealth {
+  path: string;
+  ok: boolean;
+  error?: string;
+  lastReadAt: number;
+}
+
 export class OpenClawSource implements AgentSource {
   readonly provider: Provider = 'openclaw';
   readonly history: OpenClawHistory;
@@ -31,6 +39,8 @@ export class OpenClawSource implements AgentSource {
   private watchers: FSWatcher[] = [];
   private knownSessions = new Map<string, OpenClawSession>();
   private activeAgentIds = new Set<string>();
+  /** Health state per db path, exposed through sources() for /api/health (P1-1). */
+  private dbHealth = new Map<string, DbHealth>();
 
   constructor(private readonly opts: OpenClawSourceOptions) {
     this.history = new OpenClawHistory(opts.openclawHome);
@@ -80,17 +90,35 @@ export class OpenClawSource implements AgentSource {
     this.watchers = [];
   }
 
+  /**
+   * Returns one SourceInfo entry per discovered database, with ok/error/lastReadAt
+   * reflecting the last read result (P1-1). The global ok is false if any db errored.
+   */
   sources(): SourceInfo[] {
     const dbs = findOpenClawDatabases(this.opts.openclawHome);
-    return [
-      {
+    if (dbs.length === 0) {
+      return [
+        {
+          label: 'openclaw',
+          provider: 'openclaw',
+          path: this.opts.openclawHome,
+          sessions: this.activeAgentIds.size,
+          ok: false,
+          error: 'No databases found',
+        },
+      ];
+    }
+    return dbs.map((dbPath) => {
+      const h = this.dbHealth.get(dbPath);
+      return {
         label: 'openclaw',
         provider: 'openclaw',
-        path: dbs[0] || this.opts.openclawHome,
+        path: dbPath,
         sessions: this.activeAgentIds.size,
-        ok: true,
-      },
-    ];
+        ok: h ? h.ok : true,
+        ...(h?.error ? { error: h.error } : {}),
+      } satisfies SourceInfo;
+    });
   }
 
   transcriptPathOf(agentId: string): string | undefined {
@@ -123,25 +151,42 @@ export class OpenClawSource implements AgentSource {
 
   /**
    * Reads sessions from SQLite or Gateway and updates the Office state.
+   *
+   * Changes vs. previous version:
+   * - P0-2: addSub() return value is checked; on false the agent is NOT added to
+   *   activeAgentIds, so the next sync cycle retries when the parent is present.
+   * - P1-3: isSub is determined solely by parentSessionKey presence (and that it differs
+   *   from the session's own key) — spawnDepth is used as a secondary confirmation only.
+   *   This keeps sub-agents visible even when spawnDepth is absent from the new schema.
+   * - P1-4: sessions from multiple databases are deduplicated by sessionId, keeping the
+   *   record with the highest updatedAt to avoid phantom duplicates in the office.
+   * - P1-1: health state per db is stored; sources() surfaces ok/error per database.
    */
   async syncSessions(): Promise<void> {
-    let sessions: OpenClawSession[] = [];
+    let raw: OpenClawSession[] = [];
 
     // 1. Try reading from SQLite databases
     const dbs = findOpenClawDatabases(this.opts.openclawHome);
-    for (const db of dbs) {
-      const dbSessions = await readSessionsFromDb(db);
-      sessions.push(...dbSessions);
+    for (const dbPath of dbs) {
+      const result = await readSessionsFromDb(dbPath);
+      // Update per-db health state (P1-1)
+      this.dbHealth.set(dbPath, {
+        path: dbPath,
+        ok: result.ok,
+        error: result.error,
+        lastReadAt: Date.now(),
+      });
+      raw.push(...result.sessions);
     }
 
     // 2. If no SQLite records, check JSON dump or cache in state directory
-    if (sessions.length === 0) {
+    if (raw.length === 0) {
       const stateCache = join(this.opts.openclawHome, 'state', 'sessions.json');
-      sessions = readSessionsFromJson(stateCache);
+      raw = readSessionsFromJson(stateCache);
     }
 
     // 3. Optional: if Gateway URL configured, try querying
-    if (sessions.length === 0 && this.opts.gatewayUrl) {
+    if (raw.length === 0 && this.opts.gatewayUrl) {
       try {
         const headers: Record<string, string> = {};
         if (this.opts.gatewayToken) {
@@ -150,15 +195,26 @@ export class OpenClawSource implements AgentSource {
         const res = await fetch(`${this.opts.gatewayUrl}/api/sessions`, { headers, signal: AbortSignal.timeout(2000) });
         if (res.ok) {
           const body = (await res.json()) as any;
-          if (Array.isArray(body)) sessions = body;
-          else if (Array.isArray(body.sessions)) sessions = body.sessions;
+          if (Array.isArray(body)) raw = body;
+          else if (Array.isArray(body.sessions)) raw = body.sessions;
         }
       } catch {
         // Gateway query timed out or unavailable
       }
     }
 
-    // Sort so parent sessions (spawnDepth 0 or lower) are processed before child subagents
+    // Deduplicate by sessionId across databases, keeping highest updatedAt (P1-4).
+    const deduped = new Map<string, OpenClawSession>();
+    for (const s of raw) {
+      const existing = deduped.get(s.sessionId);
+      if (!existing || (s.updatedAt ?? 0) > (existing.updatedAt ?? 0)) {
+        deduped.set(s.sessionId, s);
+      }
+    }
+    const sessions = Array.from(deduped.values());
+
+    // Sort so parent sessions (spawnDepth 0 or lower) are processed before child subagents.
+    // Parents must be in the Office before addSub() is called for their children.
     sessions.sort((a, b) => (a.spawnDepth ?? 0) - (b.spawnDepth ?? 0));
 
     this.history.setSessions(sessions);
@@ -190,7 +246,11 @@ export class OpenClawSource implements AgentSource {
       const keyParts = s.key.split(':');
       const channel = keyParts.length > 2 ? keyParts[2] : 'main';
 
-      const isSub = Boolean(s.parentSessionKey && s.spawnDepth && s.spawnDepth > 0);
+      // P1-3: treat session as sub when it has a parentSessionKey that differs from its
+      // own key — this is reliable even when spawnDepth is absent from the schema.
+      // spawnDepth > 0 is kept as a secondary signal (belt and suspenders).
+      const hasParent = Boolean(s.parentSessionKey && s.parentSessionKey !== s.key);
+      const isSub = hasParent || Boolean(s.spawnDepth && s.spawnDepth > 0);
       const targetKind = isSub ? 'sub' : 'main';
       const existing = this.opts.office.detail(agentId)?.agent;
 
@@ -207,6 +267,10 @@ export class OpenClawSource implements AgentSource {
       if (!this.activeAgentIds.has(agentId)) {
         // New session arrived
         if (isSub) {
+          // P0-2: check addSub return value. When the parent is not yet in the Office
+          // (e.g., parallel sync where parent and child were read in the same batch but
+          // parent's addMain is still pending), addSub returns false. We do NOT mark the
+          // agent as active so the next poll cycle retries the insertion.
           const added = this.opts.office.addSub({
             id: agentId,
             parentId: `openclaw:${s.parentSessionKey}`,
@@ -216,9 +280,8 @@ export class OpenClawSource implements AgentSource {
             background: false,
             startedAt: s.sessionStartedAt || now,
           });
-          if (added) {
-            this.activeAgentIds.add(agentId);
-          }
+          if (!added) continue; // retry on next sync when parent is present
+          this.activeAgentIds.add(agentId);
         } else {
           this.opts.office.addMain({
             id: agentId,

@@ -153,10 +153,18 @@ export function isLoopbackBind(value: string | undefined): boolean {
  *   ou vazia = desligado: sem ela não dá para saber se a porta está exposta.
  * HABBLAUD_TERMINAL com qualquer valor que não seja "ligado" (0, false, off...) desliga; não existe forma
  * de ligar com a porta exposta.
+ *
+ * HABBLAUD_TRUST_PROXY=1: modo "atrás de proxy confiável". Habilita terminal/mensagens mesmo com bind em
+ * 0.0.0.0, declarando que um proxy reverso local (Nginx, Caddy, Traefik) é o único ponto de entrada e
+ * não está expondo a porta do Habblaud diretamente na LAN. Use apenas quando o container não publica a
+ * porta na rede — o proxy deve escutar na LAN e repassar apenas para 127.0.0.1:<porta> no host.
+ * Documentado no README: seção "Terminal e mensagens no Docker com proxy reverso".
  */
 export function terminalOffReason(env: NodeJS.ProcessEnv, host: string, inDocker: boolean): string | undefined {
   const flag = env.HABBLAUD_TERMINAL?.trim();
   if (flag && !isTruthy(flag)) return `HABBLAUD_TERMINAL=${flag}`;
+  // HABBLAUD_TRUST_PROXY=1: proxy reverso local garante que a porta não está exposta na LAN.
+  if (isTruthy(env.HABBLAUD_TRUST_PROXY?.trim())) return undefined;
   if (inDocker) {
     const bind = env.HABBLAUD_BIND?.trim();
     if (!bind) return tr('HABBLAUD_BIND não chegou ao container, então a porta pode estar exposta na rede');
