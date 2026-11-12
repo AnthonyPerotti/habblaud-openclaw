@@ -129,8 +129,12 @@ export class OpenClawSource implements AgentSource {
 
     // 1. Try reading from SQLite databases
     const dbs = findOpenClawDatabases(this.opts.openclawHome);
+    log.info(`[OpenClaw] Scanning database paths in ${this.opts.openclawHome}: ${dbs.join(', ') || 'none found'}`);
     for (const db of dbs) {
       const dbSessions = await readSessionsFromDb(db);
+      if (dbSessions.length > 0) {
+        log.info(`[OpenClaw] Read ${dbSessions.length} session(s) from ${db}`);
+      }
       sessions.push(...dbSessions);
     }
 

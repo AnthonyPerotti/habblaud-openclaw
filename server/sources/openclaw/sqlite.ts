@@ -61,30 +61,41 @@ function decompressPayload(raw: unknown): string | null {
  * - <openclawHome>/openclaw.sqlite
  */
 export function findOpenClawDatabases(openclawHome: string): string[] {
-  const dbs: string[] = [];
-  if (!existsSync(openclawHome)) return dbs;
+  const dbs = new Set<string>();
+  if (!existsSync(openclawHome)) return [];
 
-  const agentsDir = join(openclawHome, 'agents');
-  if (existsSync(agentsDir)) {
+  // Check known standard locations first
+  const known = [
+    join(openclawHome, 'openclaw.sqlite'),
+    join(openclawHome, 'openclaw.db'),
+    join(openclawHome, 'state', 'openclaw.sqlite'),
+    join(openclawHome, 'state', 'openclaw.db'),
+  ];
+  for (const k of known) {
+    if (existsSync(k)) dbs.add(k);
+  }
+
+  // Scan directories up to depth 3
+  function scan(dir: string, depth: number) {
+    if (depth > 3) return;
     try {
-      const agents = readdirSync(agentsDir, { withFileTypes: true });
-      for (const a of agents) {
-        if (!a.isDirectory()) continue;
-        const dbPath = join(agentsDir, a.name, 'agent', 'openclaw-agent.sqlite');
-        if (existsSync(dbPath)) dbs.push(dbPath);
+      const entries = readdirSync(dir, { withFileTypes: true });
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) {
+          if (e.name === 'node_modules' || e.name === '.git') continue;
+          scan(full, depth + 1);
+        } else if (e.isFile() && (e.name.endsWith('.sqlite') || e.name.endsWith('.db'))) {
+          dbs.add(full);
+        }
       }
     } catch {
-      // directory listing failed
+      // ignore
     }
   }
 
-  const stateDb = join(openclawHome, 'state', 'openclaw.sqlite');
-  if (existsSync(stateDb)) dbs.push(stateDb);
-
-  const rootDb = join(openclawHome, 'openclaw.sqlite');
-  if (existsSync(rootDb)) dbs.push(rootDb);
-
-  return dbs;
+  scan(openclawHome, 0);
+  return Array.from(dbs);
 }
 
 /**
@@ -137,9 +148,9 @@ export async function readSessionsFromDb(dbPath: string): Promise<OpenClawSessio
         const sid = String(row.session_id || payload?.sessionId || payload?.session_id || row.id || '');
         if (!sid || sessionMap.has(sid)) continue;
 
-        const key = payload?.key || `session:${sid}`;
-        const model = payload?.model || payload?.modelProvider || undefined;
-        const status = payload?.status || (payload?.error ? 'failed' : 'active');
+        const key = (typeof row.session_key === 'string' && row.session_key) || (typeof row.key === 'string' && row.key) || payload?.key || `session:${sid}`;
+        const model = (typeof row.model === 'string' && row.model) || payload?.model || payload?.modelProvider || undefined;
+        const status = (typeof row.status === 'string' && row.status) || payload?.status || (payload?.error ? 'failed' : 'active');
         const startedAt = Number(payload?.sessionStartedAt || payload?.createdAt || row.created_at || Date.now());
         const lastAt = Number(payload?.lastInteractionAt || payload?.updatedAt || row.updated_at || startedAt);
 
