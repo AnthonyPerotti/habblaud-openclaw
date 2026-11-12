@@ -11,6 +11,7 @@
 // 4. `transcriptPathOf(agentId)` returns the path to this JSONL file.
 // 5. `createOpenClawTerminalParser()` parses each line into a `TerminalEntry`.
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { maskSecrets, truncate } from '../../../shared/activity';
 import { hash32 } from '../../../shared/hash';
@@ -25,16 +26,29 @@ export const INPUT_MAX = 2_000;
 export const RESULT_MAX = 4_000;
 
 let transcriptsDir: string | null = null;
+/** Pasta dos JSONL exportados. Precisa ser gravavel: no Docker o rootfs e read-only (/app), entao dist/transcripts
+ *  nao pode ser criado. HABBLAUD_TRANSCRIPTS_DIR manda; sem ela, tenta dist/transcripts, <dataDir>/transcripts e o tmp. */
 function getTranscriptsDir(): string {
   if (transcriptsDir) return transcriptsDir;
-  const dir = join(resolve('.'), 'dist', 'transcripts');
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    // ignore
+  const fromEnv = process.env.HABBLAUD_TRANSCRIPTS_DIR?.trim();
+  const dataDir = process.env.HABBLAUD_DATA_DIR?.trim() || '/data';
+  const candidates = fromEnv
+    ? [fromEnv]
+    : [join(resolve('.'), 'dist', 'transcripts'), join(dataDir, 'transcripts'), join(tmpdir(), 'habblaud-transcripts')];
+  for (const dir of candidates) {
+    try {
+      mkdirSync(dir, { recursive: true });
+      transcriptsDir = dir;
+      return dir;
+    } catch {
+      // proxima candidata
+    }
   }
-  transcriptsDir = dir;
-  return dir;
+  throw new Error(
+    'nenhuma pasta gravavel para os transcripts do terminal (tentei: ' +
+      candidates.join(', ') +
+      '); defina HABBLAUD_TRANSCRIPTS_DIR',
+  );
 }
 
 /** Cache tracking exported event IDs per session file to append efficiently */
@@ -76,6 +90,53 @@ function toolTitle(tool: string, inputRaw: unknown): string {
     return `${t}(${shortArg})`;
   }
   return t;
+}
+
+/** Texto de um content do OpenClaw: string, ou lista de blocos com `text`. */
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const b of content) {
+    if (typeof b === 'string') parts.push(b);
+    else if (b && typeof b === 'object' && typeof (b as any).text === 'string') parts.push((b as any).text);
+  }
+  return parts.filter(Boolean).join('\n');
+}
+
+/**
+ * O transcript do OpenClaw guarda o envelope cru ({type:'message', message:{role, content}}), com
+ * `toolCall`/`toolResult` e `toolResult` carregando `toolCallId`. Traduz para o formato plano que
+ * eventToTerminalEntries entende, para a conversa aparecer igual a do Claude Code.
+ */
+export function adaptOpenClawEvent(payload: any): any {
+  if (!payload || typeof payload !== 'object') return payload;
+  const normBlocks = (content: unknown) =>
+    Array.isArray(content)
+      ? content.map((b: any) =>
+          b && typeof b === 'object' && b.type === 'toolCall'
+            ? { type: 'tool_use', id: b.id, name: b.name, input: b.arguments ?? b.input ?? {} }
+            : b,
+        )
+      : content;
+  if (payload.type === 'message' && payload.message && typeof payload.message === 'object') {
+    const m = payload.message;
+    if (m.role === 'toolResult' || m.role === 'tool_result') {
+      return {
+        role: 'tool_result',
+        tool_use_id: m.toolCallId ?? m.tool_use_id,
+        content: contentText(m.content),
+        is_error: Boolean(m.isError ?? m.is_error),
+        timestamp: payload.timestamp,
+        id: payload.id,
+      };
+    }
+    if (m.role === 'system') {
+      return { role: 'system', text: contentText(m.content), level: m.level, timestamp: payload.timestamp, id: payload.id };
+    }
+    return { role: m.role, content: normBlocks(m.content), timestamp: payload.timestamp, id: payload.id };
+  }
+  return { ...payload, content: normBlocks(payload.content) };
 }
 
 /**
@@ -306,14 +367,14 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
   let seq = 0;
   for (const row of rows) {
     let payload: any = null;
-    const rawData = row.entry_json || row.payload || row.data || row.content;
+    const rawData = row.entry_json || row.payload || row.data || row.event_json || row.content;
     if (rawData) {
       const decompressed = decompressPayload(rawData);
       if (decompressed) {
         try { payload = JSON.parse(decompressed); } catch { /* ignore */ }
       }
     }
-    const entries = eventToTerminalEntries(row, payload, opts.sessionKey, ++seq);
+    const entries = eventToTerminalEntries(row, adaptOpenClawEvent(payload), opts.sessionKey, ++seq);
     allEntries.push(...entries);
   }
 

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createOpenClawTerminalParser, syncOpenClawTranscript } from './terminal';
+import { adaptOpenClawEvent, createOpenClawTerminalParser, syncOpenClawTranscript } from './terminal';
 
 let DatabaseSync: any = null;
 try {
@@ -137,6 +137,29 @@ describe('OpenClaw Terminal — transcript_events to JSONL fixture test', () => 
     expect(parsedEntries[4]).toMatchObject({
       kind: 'assistant',
       text: 'Aqui estão os containers ativos no sistema.',
+    });
+  });
+
+  it('adaptOpenClawEvent adapta envelopes com message, toolCall e toolResult', () => {
+    const rawMsg = {
+      type: 'message',
+      timestamp: 12345,
+      id: 'msg-1',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call-123',
+        content: [{ text: 'resultado do comando' }],
+        isError: false,
+      },
+    };
+    const adapted = adaptOpenClawEvent(rawMsg);
+    expect(adapted).toMatchObject({
+      role: 'tool_result',
+      tool_use_id: 'call-123',
+      content: 'resultado do comando',
+      is_error: false,
+      timestamp: 12345,
+      id: 'msg-1',
     });
   });
 });
