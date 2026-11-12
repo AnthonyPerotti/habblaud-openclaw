@@ -1,23 +1,20 @@
-# Servidor do Habblaud
+# Servidor do Habblaud (OpenClaw)
 
-Node puro (sem dependências de runtime). Observa as sessões **abertas** do Claude Code em todas as
-contas da máquina, mantém o modelo do escritório e transmite tudo via SSE.
+Node puro (sem dependências de runtime adicionais). Observa as sessões ativas do OpenClaw em bancos SQLite (`session_nodes`) e arquivos de estado, mantém o modelo espacial do escritório e transmite eventos em tempo real via SSE.
 
 ```
 npm run dev      # servidor + Vite (middleware, HMR) em http://127.0.0.1:4747
 npm run build && npm start   # produção: serve dist/client
 ```
 
-## Fontes de dados (somente leitura)
+## Fontes de dados do OpenClaw (somente leitura)
 
-| O quê | Onde |
+| Recurso | Localização / Origem |
 | --- | --- |
-| Sessões abertas e status (ocupado/ocioso/esperando) | `<config>/sessions/<pid>.json` (+ PID vivo, fora do Docker) |
-| Atividades, tarefas, título, números | `<config>/projects/<cwd>/<sessionId>.jsonl` (lê o último ~1 MB no boot; o começo em segundo plano) |
-| Subagentes (inclusive de workflows) | `<config>/projects/<cwd>/<sessionId>/subagents/**/agent-*.jsonl` + `.meta.json` |
-| Conta (e-mail, organização) e cache de uso | `~/.claude.json` (conta padrão) ou `<config>/.claude.json` — só esses campos |
-| Uso ao vivo (5h e semanal) | `~/.habblaud/usage/<conta>.json`, gravado pelo mod do Habblaud (`npm run mod:install`) ou pelo `scripts/statusline-tap.mjs` (`npm run usage:install`) |
-| Atalho da conta (`c`, `d`...) | linhas `alias x='... claude ...'` de `~/.zshrc`, `~/.bashrc`, `~/.zprofile`, `~/.bash_profile` |
+| Sessões e nós de agentes | `<OPENCLAW_HOME>/agents/<agentId>/agent/openclaw-agent.sqlite` (tabela `session_nodes`, coluna `entry_json`) |
+| Estado geral e sessões raiz | `<OPENCLAW_HOME>/state/openclaw.sqlite` ou `<OPENCLAW_HOME>/openclaw.sqlite` |
+| Cache de estado e exportação | `<OPENCLAW_HOME>/state/sessions.json` |
+| OpenClaw Gateway API | Endpoint configurado via `OPENCLAW_GATEWAY_URL` (/api/sessions) |
 
 **Forks** (subagentes que herdam o contexto do pai): o transcript começa com uma linha `fork-context-ref`, a
 cópia da chamada `Agent` do pai (mesmo `tool_use` id do `.meta.json`) e o resultado dela ("Fork started…") junto

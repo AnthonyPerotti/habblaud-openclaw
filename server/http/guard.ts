@@ -15,6 +15,11 @@ import { tr } from '../../shared/i18n';
 export function parseAllowedHosts(raw: string | undefined): Set<string> {
   const out = new Set<string>();
   for (const item of (raw ?? '').split(',')) {
+    const trimmed = item.trim().toLowerCase();
+    if (trimmed === '*') {
+      out.add('*');
+      continue;
+    }
     const name = hostnameOf(item.trim());
     if (name) out.add(name);
   }
@@ -63,6 +68,7 @@ export function isLoopbackHost(host: string | undefined): boolean {
  */
 export function hostAllowed(host: string | undefined, allowed: ReadonlySet<string>): boolean {
   if (host === undefined) return true;
+  if (allowed.has('*')) return true;
   const name = hostnameOf(host);
   if (!name) return false;
   return isIP(name) !== 0 || isLoopbackName(name) || allowed.has(name);
@@ -75,6 +81,7 @@ export function hostAllowed(host: string | undefined, allowed: ReadonlySet<strin
 export function originAllowed(origin: string | undefined, host: string | undefined, allowed: ReadonlySet<string>): boolean {
   if (origin === undefined) return true;
   if (origin === 'null') return false;
+  if (allowed.has('*')) return true;
   let url: URL;
   try {
     url = new URL(origin);

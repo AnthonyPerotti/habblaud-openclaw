@@ -112,6 +112,9 @@ export class OpenClawSource implements AgentSource {
       const w = watch(this.opts.openclawHome, { recursive: true }, () => {
         this.syncSessions().catch(() => {});
       });
+      w.on('error', (err) => {
+        log.warnOnce('openclaw-watcher-error', `OpenClaw filesystem watcher error: ${errMsg(err)}`);
+      });
       this.watchers.push(w);
     } catch {
       // Recursive watch not supported on some platforms; pollTimer handles it
