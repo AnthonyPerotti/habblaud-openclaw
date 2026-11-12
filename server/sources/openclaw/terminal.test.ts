@@ -140,3 +140,4 @@ describe('OpenClaw Terminal — transcript_events to JSONL fixture test', () => 
     });
   });
 });
+

@@ -229,13 +229,9 @@ When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 | `OPENCLAW_GATEWAY_URL` | OpenClaw Gateway endpoint URL | Unset |
 | `OPENCLAW_GATEWAY_TOKEN` | Bearer token for OpenClaw Gateway authentication | Unset |
 | `HABBLAUD_PORT` | HTTP port exposed by the Node server | `4747` |
-| `HABBLAUD_BIND` | Bind host address (`127.0.0.1` for local loopback) | `127.0.0.1` |
-| `HABBLAUD_TRUST_PROXY` | Enable terminal and messages when behind a trusted local reverse proxy | `1` |
+| `HABBLAUD_BIND` | Host bind address (`0.0.0.0` for all interfaces, `127.0.0.1` for local loopback) | `0.0.0.0` |
+| `HABBLAUD_TRUST_PROXY` | Enable terminal and messages when behind a trusted local reverse proxy or LAN setup | `1` |
 | `HABBLAUD_ALLOWED_HOSTS` | Accepted host headers (`*` allowed in Docker) | `*` in Docker, `localhost` outside |
-| `HABBLAUD_LANG` | UI language (`pt`, `en`, `es`, `fr`) | `pt` |
-| `HABBLAUD_DEMO` | Enable simulated demo agents | `0` |
-| `HABBLAUD_TERMINAL` | Enable agent terminal inspection | `1` |
-| `HABBLAUD_TRUST_PROXY` | Enable terminal and messages when behind a trusted local reverse proxy | Unset |
 | `HABBLAUD_WORLD` | Enable Habblaud World community uplink | `0` |
 
 ## Troubleshooting and Operations
