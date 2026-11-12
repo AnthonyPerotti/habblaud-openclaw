@@ -10,6 +10,7 @@ import { createTerminalParser, type TerminalParser } from '../terminal';
 import { discoverOpenClawAccounts } from './accounts';
 import { OpenClawHistory } from './history';
 import { findOpenClawDatabases, readSessionsFromDb, readSessionsFromJson } from './sqlite';
+import { createOpenClawTerminalParser, syncOpenClawTranscript } from './terminal';
 import type { OpenClawSession } from './types';
 import { tr } from '../../../shared/i18n';
 
@@ -124,13 +125,18 @@ export class OpenClawSource implements AgentSource {
   transcriptPathOf(agentId: string): string | undefined {
     const rawKey = agentId.replace(/^openclaw:/, '');
     const session = this.knownSessions.get(rawKey);
-    if (!session) return undefined;
-    const dbs = findOpenClawDatabases(this.opts.openclawHome);
-    return dbs[0] || join(this.opts.openclawHome, 'openclaw.sqlite');
+    // Export transcript_events from SQLite to a temporary JSONL file so the Terminal
+    // viewer tails a real JSONL stream instead of attempting to FileTail raw binary SQLite.
+    return syncOpenClawTranscript({
+      openclawHome: this.opts.openclawHome,
+      agentId: session?.agentId || 'main',
+      sessionKey: rawKey,
+      sessionId: session?.sessionId,
+    });
   }
 
   terminalParser?(agentId: string): TerminalParser | undefined {
-    return createTerminalParser();
+    return createOpenClawTerminalParser();
   }
 
   private setupWatchers(): void {

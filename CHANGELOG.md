@@ -63,6 +63,23 @@ do meio (0.**3**.0).
 
 ### Adicionado
 
+- **[OpenClaw] Entrega de mensagens ao OpenClaw via Gateway (HTTP / WS).** Mensagens digitadas
+  pelo painel do Habblaud chegam diretamente à sessão correspondente do OpenClaw via Gateway
+  (`POST /v1/chat/completions` com header `x-openclaw-session-key` ou WebSocket RPC `sessions.send`
+  / `operator.write` com `queueMode: followup`), sem necessidade de instalar plugins na home
+  montada `:ro`. Token de autenticação seguro via env ou arquivo local. `canMessage` ativado
+  automaticamente quando o Gateway estiver configurado e alcançável.
+
+- **[OpenClaw] Terminal em tempo real para OpenClaw (via `transcript_events`).** O terminal agora
+  lê a tabela `transcript_events` no SQLite do OpenClaw (`openclaw-agent.sqlite` / `openclaw.sqlite`),
+  converte os eventos (prompts, respostas, raciocínio, ferramentas e resultados) com segredos
+  mascarados em um stream JSONL temporário (`dist/transcripts/`), permitindo visualização completa da
+  conversa sem tentar ler arquivos SQLite binários diretamente com `FileTail`.
+
+- **[Docker] Exposição segura: bind padrão em `127.0.0.1` e `HABBLAUD_TRUST_PROXY=1`.** A porta do
+  container agora publica em `127.0.0.1:4747:4747` por padrão, evitando exposição aberta na LAN e
+  permitindo uso seguro com proxies reversos locais (Nginx Proxy Manager, Caddy, Traefik).
+
 - **[OpenClaw P2-1] `HABBLAUD_TRUST_PROXY=1`: terminal e mensagens com proxy reverso local.**
   Em Docker com `HABBLAUD_BIND=0.0.0.0`, o terminal e as mensagens eram sempre desligados porque
   a porta poderia estar exposta na LAN — sem caminho válido de habilitar. A nova variável

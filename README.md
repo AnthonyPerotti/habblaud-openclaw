@@ -171,7 +171,7 @@ services:
     container_name: habblaud
     restart: unless-stopped
     ports:
-      - "4747:4747"
+      - "127.0.0.1:4747:4747"
     volumes:
       # Mount the OpenClaw state directory in read-only mode (:ro)
       - /DATA/AppData/openclaw:/openclaw:ro
@@ -180,7 +180,8 @@ services:
       OPENCLAW_HOME: /openclaw
       OPENCLAW_GATEWAY_URL: ""
       OPENCLAW_GATEWAY_TOKEN: ""
-      HABBLAUD_BIND: "0.0.0.0"
+      HABBLAUD_BIND: "127.0.0.1"
+      HABBLAUD_TRUST_PROXY: "1"
       HABBLAUD_PORT: "4747"
       HABBLAUD_ALLOWED_HOSTS: "*"
       HABBLAUD_LANG: "pt"
@@ -228,7 +229,8 @@ When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 | `OPENCLAW_GATEWAY_URL` | OpenClaw Gateway endpoint URL | Unset |
 | `OPENCLAW_GATEWAY_TOKEN` | Bearer token for OpenClaw Gateway authentication | Unset |
 | `HABBLAUD_PORT` | HTTP port exposed by the Node server | `4747` |
-| `HABBLAUD_BIND` | Bind host address (`0.0.0.0` for all interfaces) | `0.0.0.0` |
+| `HABBLAUD_BIND` | Bind host address (`127.0.0.1` for local loopback) | `127.0.0.1` |
+| `HABBLAUD_TRUST_PROXY` | Enable terminal and messages when behind a trusted local reverse proxy | `1` |
 | `HABBLAUD_ALLOWED_HOSTS` | Accepted host headers (`*` allowed in Docker) | `*` in Docker, `localhost` outside |
 | `HABBLAUD_LANG` | UI language (`pt`, `en`, `es`, `fr`) | `pt` |
 | `HABBLAUD_DEMO` | Enable simulated demo agents | `0` |

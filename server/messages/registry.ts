@@ -23,6 +23,7 @@ import { describeMessage, MESSAGE_MAX } from '../../shared/messages';
 import type { Activity, AgentInfo, InboxMessage, OutboxMessage } from '../../shared/types';
 import { errMsg, log } from '../log';
 import type { CodexQueueResult, CodexQueueRunner } from './codex';
+import type { OpenClawDeliveryResult, OpenClawDeliveryRunner } from './openclaw';
 import { tr } from '../../shared/i18n';
 
 /** Sessão que perguntou pela caixa de entrada há até este tempo: recebe mensagens (canMessage). */
@@ -53,6 +54,10 @@ export const ERR_CODEX_SLOW = tr('o Codex demorou demais com as mensagens anteri
 export const ERR_CODEX_NOT_CONFIRMED = tr('o auxiliar do Codex não confirmou a entrega');
 export const ERR_CODEX_HOME = tr('a pasta da conta do Codex deste agente é desconhecida');
 export const ERR_CODEX_REFUSED = tr('o codex queue não aceitou a mensagem');
+export const ERR_OPENCLAW_UNAVAILABLE = tr('não há como entregar ao OpenClaw agora: o gateway não está configurado ou alcançável');
+export const ERR_OPENCLAW_REFUSED = tr('o gateway do OpenClaw não aceitou a mensagem');
+export const ERR_OPENCLAW_SLOW = tr('o gateway do OpenClaw demorou demais para responder');
+export const ERR_OPENCLAW_NOT_CONFIRMED = tr('o gateway do OpenClaw não confirmou a entrega');
 
 const ERROR_MAX = 300;
 const ID_MAX = 300;
@@ -74,6 +79,12 @@ export interface CodexDeliveryOptions {
   homeOf: (account: string) => string | undefined;
 }
 
+/** Entregador do OpenClaw (Gateway HTTP/WS). */
+export interface OpenClawDeliveryOptions {
+  run: OpenClawDeliveryRunner;
+  isAvailable: () => boolean;
+}
+
 export interface MessageRegistryOptions {
   office: OfficeLike;
   /** Agente do demo (Office.demoAgent): esses só existem no snapshot. */
@@ -82,6 +93,8 @@ export interface MessageRegistryOptions {
   demoDeliver?: (agentId: string, text: string) => boolean;
   /** Mensagens aos agentes do Codex; ausente = eles não recebem. */
   codex?: CodexDeliveryOptions;
+  /** Mensagens aos agentes do OpenClaw via Gateway; ausente = eles não recebem. */
+  openclaw?: OpenClawDeliveryOptions;
   now?: () => number;
   /** Intervalo do relógio interno (start). */
   tickMs?: number;
@@ -123,6 +136,8 @@ interface Entry {
   demo?: boolean;
   /** Mensagem a um agente do Codex: sai pelo entregador do Codex ('node' = o servidor rodou; 'bridge' = o auxiliar). */
   codex?: true;
+  /** Mensagem a um agente do OpenClaw: sai pelo entregador do OpenClaw (Gateway HTTP/WS). */
+  openclaw?: true;
   via?: 'node' | 'bridge';
   /** Falhou por falta de confirmação: uma confirmação atrasada ainda corrige a situação. */
   late?: boolean;
@@ -147,12 +162,16 @@ const isFinal = (e: Entry) => e.msg.status === 'delivered' || e.msg.status === '
 
 /**
  * Por que o agente não recebe mensagens agora (undefined = recebe). `reachable`: a sessão tem o plugin conectado (ou,
- * no Codex, há entregador).
+ * no Codex/OpenClaw, há entregador configurado e alcançável).
  */
 function unavailableReason(a: AgentInfo, reachable: boolean): string | undefined {
   if (a.kind !== 'main') return tr('subagentes não recebem mensagens: mande para o agente principal');
   if (!present(a)) return tr('o agente já saiu do escritório');
-  if (!reachable) return a.provider === 'codex' ? ERR_CODEX_UNAVAILABLE : tr('a sessão não está com o plugin habblaud-mensagens conectado (npm run mod:install)');
+  if (!reachable) {
+    if (a.provider === 'codex') return ERR_CODEX_UNAVAILABLE;
+    if (a.provider === 'openclaw') return ERR_OPENCLAW_UNAVAILABLE;
+    return tr('a sessão não está com o plugin habblaud-mensagens conectado (npm run mod:install)');
+  }
   return undefined;
 }
 
@@ -228,18 +247,20 @@ export class MessageRegistry {
 
   /**
    * Agentes principais presentes que recebem mensagens agora: os do Claude Code cuja sessão perguntou pela caixa de
-   * entrada há pouco e os do Codex, se há entregador. É o que o Office põe no snapshot.
+   * entrada há pouco, os do Codex (se há entregador) e os do OpenClaw (se o gateway está configurado e alcançável).
    */
   reachable(): Set<string> {
     const out = new Set<string>();
     for (const id of this.seen.keys()) if (this.canMessage(id)) out.add(id);
     if (this.codexAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'codex' && a.kind === 'main' && present(a)) out.add(a.id);
+    if (this.openclawAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'openclaw' && a.kind === 'main' && present(a)) out.add(a.id);
     return out;
   }
 
   canMessage(agentId: string): boolean {
     const a = this.opts.office.get(agentId);
     if (a?.provider === 'codex') return this.codexAvailable() && present(a) && a.kind === 'main';
+    if (a?.provider === 'openclaw') return this.openclawAvailable() && present(a) && a.kind === 'main';
     const at = this.seen.get(agentId);
     if (at === undefined || this.now() - at >= this.presenceMs) return false;
     return present(a) && a.kind === 'main';
@@ -249,6 +270,12 @@ export class MessageRegistry {
   codexAvailable(): boolean {
     const c = this.opts.codex;
     return !!c && (!!c.run || this.bridgeRecent());
+  }
+
+  /** Há como entregar ao OpenClaw: gateway configurado e alcançável. */
+  openclawAvailable(): boolean {
+    const oc = this.opts.openclaw;
+    return !!oc && oc.isAvailable();
   }
 
   /**
@@ -273,9 +300,11 @@ export class MessageRegistry {
     const entry: Entry = { msg: { id, agentId, status: 'queued', createdAt: now, updatedAt: now }, text, activity: describeMessage(text), target: agent.sessionId };
     if (demo) entry.demo = true;
     else if (real?.provider === 'codex') entry.codex = true;
+    else if (real?.provider === 'openclaw') entry.openclaw = true;
     this.messages.set(id, entry);
     const out = { ...entry.msg };
     if (entry.codex) this.pumpCodex();
+    if (entry.openclaw) this.pumpOpenClaw();
     return { message: out };
   }
 
@@ -407,9 +436,19 @@ export class MessageRegistry {
       if (!present(a)) this.fail(e, now, ERR_GONE);
       else if (e.msg.status === 'queued' && a.sessionId !== e.target) this.fail(e, now, ERR_SESSION_CHANGED);
       else if (e.msg.status === 'queued' && now - e.msg.createdAt >= this.queuedTimeoutMs) {
-        this.fail(e, now, !e.codex ? ERR_NOT_FETCHED : this.opts.codex?.run ? ERR_CODEX_SLOW : ERR_CODEX_NOT_FETCHED);
+        this.fail(
+          e,
+          now,
+          e.openclaw
+            ? ERR_OPENCLAW_SLOW
+            : !e.codex
+            ? ERR_NOT_FETCHED
+            : this.opts.codex?.run
+            ? ERR_CODEX_SLOW
+            : ERR_CODEX_NOT_FETCHED,
+        );
       } else if (e.msg.status === 'sent' && now - (e.sentAt ?? now) >= this.sentTimeoutMs) {
-        this.fail(e, now, e.codex ? ERR_CODEX_NOT_CONFIRMED : ERR_NOT_CONFIRMED);
+        this.fail(e, now, e.openclaw ? ERR_OPENCLAW_NOT_CONFIRMED : e.codex ? ERR_CODEX_NOT_CONFIRMED : ERR_NOT_CONFIRMED);
         e.late = true;
       }
     }
@@ -425,6 +464,7 @@ export class MessageRegistry {
       if (!this.opts.codex?.run) this.opts.office.markDirty();
     }
     this.pumpCodex();
+    this.pumpOpenClaw();
   }
 
   // ---------------------------------------------------------------- internos
@@ -476,6 +516,49 @@ export class MessageRegistry {
     if (r.ok) this.finish(e, 'delivered', now);
     else this.fail(e, now, truncate(r.error, ERROR_MAX) || ERR_CODEX_REFUSED);
     this.pumpCodex();
+  }
+
+  /**
+   * Envia as mensagens pendentes dos agentes do OpenClaw via Gateway (HTTP / WS sessions.send com queueMode: followup).
+   * Roteamento pelo session.key (removendo o prefixo openclaw: de agentId).
+   */
+  private pumpOpenClaw(): void {
+    const oc = this.opts.openclaw;
+    if (!oc) return;
+    const busy = new Set<string>();
+    for (const e of this.messages.values()) if (e.openclaw && e.msg.status === 'sent') busy.add(e.msg.agentId);
+    const now = this.now();
+    for (const e of this.messages.values()) {
+      if (!e.openclaw || e.msg.status !== 'queued' || busy.has(e.msg.agentId)) continue;
+      busy.add(e.msg.agentId);
+      const a = this.opts.office.get(e.msg.agentId);
+      if (!present(a)) {
+        this.fail(e, now, ERR_GONE);
+        continue;
+      }
+      if (a.sessionId !== e.target) {
+        this.fail(e, now, ERR_SESSION_CHANGED);
+        continue;
+      }
+      // Roteia pela chave da sessão original: openclaw:<session.key> -> <session.key>
+      const sessionKey = e.msg.agentId.replace(/^openclaw:/, '');
+      this.setStatus(e, 'sent', now);
+      e.sentAt = now;
+      oc.run({ sessionKey, text: e.text }).then(
+        (r) => this.openclawDone(e, r),
+        (err: unknown) => this.openclawDone(e, { ok: false, error: errMsg(err) }),
+      );
+    }
+  }
+
+  /** Fim da entrega de mensagem ao OpenClaw Gateway. */
+  private openclawDone(e: Entry, r: OpenClawDeliveryResult): void {
+    if (this.messages.get(e.msg.id) !== e) return;
+    if (e.msg.status !== 'sent' && !(e.msg.status === 'failed' && e.late)) return;
+    const now = this.now();
+    if (r.ok) this.finish(e, 'delivered', now);
+    else this.fail(e, now, truncate(r.error, ERROR_MAX) || ERR_OPENCLAW_REFUSED);
+    this.pumpOpenClaw();
   }
 
   private setStatus(e: Entry, status: OutboxMessage['status'], now: number): void {

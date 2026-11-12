@@ -1,4 +1,5 @@
 // Reader for OpenClaw session SQLite database and state files.
+import { createRequire } from 'node:module';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { gunzipSync, inflateSync } from 'node:zlib';
@@ -11,7 +12,22 @@ const dbErrorState = new Map<string, { msg: string; at: number }>();
 let cachedDatabaseSync: any = null;
 let sqliteCheckDone = false;
 
-async function getDatabaseSyncClass(): Promise<any> {
+export function getDatabaseSyncClassSync(): any {
+  if (cachedDatabaseSync) return cachedDatabaseSync;
+  try {
+    const req = createRequire(import.meta.url);
+    const mod = req('node:sqlite');
+    if (mod && mod.DatabaseSync) {
+      cachedDatabaseSync = mod.DatabaseSync;
+    }
+  } catch {
+    cachedDatabaseSync = null;
+  }
+  return cachedDatabaseSync;
+}
+
+export async function getDatabaseSyncClass(): Promise<any> {
+  if (cachedDatabaseSync) return cachedDatabaseSync;
   if (sqliteCheckDone) return cachedDatabaseSync;
   sqliteCheckDone = true;
   try {
@@ -51,7 +67,7 @@ function getWalTempDir(): string {
  *   3. Last resort: open with `?immutable=1`, which ignores WAL but at least reads the
  *      last checkpoint. Logs which mode was used so it's visible in Portainer.
  */
-function openDatabase(DatabaseClass: any, dbPath: string): { db: any; mode: 'normal' | 'wal-copy' | 'immutable' } {
+export function openDatabase(DatabaseClass: any, dbPath: string): { db: any; mode: 'normal' | 'wal-copy' | 'immutable' } {
   // Attempt 1: normal read-only open
   try {
     const db = new DatabaseClass(dbPath, { readOnly: true });
@@ -93,7 +109,7 @@ function openDatabase(DatabaseClass: any, dbPath: string): { db: any; mode: 'nor
   return { db, mode: 'immutable' };
 }
 
-function decompressPayload(raw: unknown): string | null {
+export function decompressPayload(raw: unknown): string | null {
   if (!raw) return null;
   if (typeof raw === 'string') {
     const trimmed = raw.trim();

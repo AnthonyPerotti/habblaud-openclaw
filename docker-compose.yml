@@ -8,7 +8,7 @@ services:
     container_name: habblaud
     restart: unless-stopped
     ports:
-      - "${HABBLAUD_BIND:-0.0.0.0}:${HABBLAUD_PORT:-4747}:4747"
+      - "${HABBLAUD_BIND:-127.0.0.1}:${HABBLAUD_PORT:-4747}:4747"
     volumes:
       # Caminho absoluto dos dados do OpenClaw no host ZimaOS montado em modo somente leitura
       - "${OPENCLAW_DATA_DIR:-/DATA/AppData/openclaw}:/openclaw:ro"
@@ -19,7 +19,8 @@ services:
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
       HABBLAUD_ALLOWED_HOSTS: ${HABBLAUD_ALLOWED_HOSTS:-*}
       HABBLAUD_DEMO: ${HABBLAUD_DEMO:-}
-      HABBLAUD_BIND: ${HABBLAUD_BIND:-0.0.0.0}
+      HABBLAUD_BIND: ${HABBLAUD_BIND:-127.0.0.1}
+      HABBLAUD_TRUST_PROXY: ${HABBLAUD_TRUST_PROXY:-1}
       HABBLAUD_TERMINAL: ${HABBLAUD_TERMINAL:-1}
       HABBLAUD_UPDATE_CHECK: 0
       HABBLAUD_LANG: ${HABBLAUD_LANG:-pt}
