@@ -31,9 +31,15 @@ export function createProviderTag(extra = ''): HTMLElement {
   return h('span', { class: `ui-prov${extra ? ` ${extra}` : ''}`, text: 'Codex', hidden: true, title: tr('Agente do Codex (OpenAI)') });
 }
 
-/** Mostra o selo só para o Codex (e não repete quando o nome da conta já diz "Codex"). */
+/** Mostra o selo só para o Codex e OpenClaw (e não repete quando o nome da conta já diz o nome). */
 export function updateProviderTag(tag: HTMLElement, provider: Provider, accountName = ''): void {
-  setHidden(tag, !showsProviderTag(provider, accountName));
+  const show = showsProviderTag(provider, accountName);
+  setHidden(tag, !show);
+  if (show) {
+    const isClaw = provider === 'openclaw';
+    setText(tag, isClaw ? 'OpenClaw' : 'Codex');
+    setTitle(tag, isClaw ? tr('Agente do OpenClaw') : tr('Agente do Codex (OpenAI)'));
+  }
 }
 
 /** Quadradinho de status (pixel), com pulso quando precisa de você. */

@@ -349,6 +349,7 @@ const api = createApiHandler({
   sources: () => agents.sources(),
   version: config.version,
   inDocker: config.inDocker,
+  allowedHosts: config.allowedHosts,
   terminal: config.terminal,
   terminals,
   sessions: history,

@@ -158,6 +158,9 @@ export class OpenClawSource implements AgentSource {
       }
     }
 
+    // Sort so parent sessions (spawnDepth 0 or lower) are processed before child subagents
+    sessions.sort((a, b) => (a.spawnDepth ?? 0) - (b.spawnDepth ?? 0));
+
     this.history.setSessions(sessions);
 
     const currentKeys = new Set<string>();
@@ -182,22 +185,40 @@ export class OpenClawSource implements AgentSource {
       }
 
       const cwd = join(this.opts.openclawHome, 'agents', s.agentId || 'main');
-      const role = s.model ? `OpenClaw · ${s.model}` : 'OpenClaw Agent';
+      const label = s.label?.trim();
+      const role = label ? `OpenClaw · ${label}` : s.model ? `OpenClaw · ${s.model}` : 'OpenClaw Agent';
       const keyParts = s.key.split(':');
       const channel = keyParts.length > 2 ? keyParts[2] : 'main';
 
+      const isSub = Boolean(s.parentSessionKey && s.spawnDepth && s.spawnDepth > 0);
+      const targetKind = isSub ? 'sub' : 'main';
+      const existing = this.opts.office.detail(agentId)?.agent;
+
+      // Check if existing agent transitioned its kind (main <-> sub)
+      if (existing && existing.kind !== targetKind) {
+        if (existing.kind === 'sub') {
+          this.opts.office.completeSub(agentId, { notify: false });
+        } else {
+          this.opts.office.closeMain(agentId);
+        }
+        this.activeAgentIds.delete(agentId);
+      }
+
       if (!this.activeAgentIds.has(agentId)) {
         // New session arrived
-        if (s.parentSessionKey && s.spawnDepth && s.spawnDepth > 0) {
-          this.opts.office.addSub({
+        if (isSub) {
+          const added = this.opts.office.addSub({
             id: agentId,
             parentId: `openclaw:${s.parentSessionKey}`,
             sessionId: s.sessionId,
             role,
-            title: s.label || `Tarefa (${channel})`,
+            title: label || `Tarefa (${channel})`,
             background: false,
             startedAt: s.sessionStartedAt || now,
           });
+          if (added) {
+            this.activeAgentIds.add(agentId);
+          }
         } else {
           this.opts.office.addMain({
             id: agentId,
@@ -209,8 +230,8 @@ export class OpenClawSource implements AgentSource {
             startedAt: s.sessionStartedAt || now,
             status,
           });
+          this.activeAgentIds.add(agentId);
         }
-        this.activeAgentIds.add(agentId);
       } else {
         // Existing agent, update status
         this.opts.office.setStatus(agentId, status);
@@ -232,8 +253,14 @@ export class OpenClawSource implements AgentSource {
     for (const id of Array.from(this.activeAgentIds)) {
       const rawKey = id.replace(/^openclaw:/, '');
       if (!currentKeys.has(rawKey)) {
-        this.opts.office.setStatus(id, 'offline');
+        const agent = this.opts.office.detail(id)?.agent;
+        if (agent?.kind === 'sub') {
+          this.opts.office.completeSub(id, { notify: false });
+        } else {
+          this.opts.office.closeMain(id);
+        }
         this.activeAgentIds.delete(id);
+        this.knownSessions.delete(rawKey);
       }
     }
   }

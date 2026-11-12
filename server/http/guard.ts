@@ -51,6 +51,25 @@ function isLoopbackName(name: string): boolean {
   return isIP(name) === 4 && name.startsWith('127.');
 }
 
+/** Domínios de rede local e homelab (mDNS/zeroconf/DNS local). */
+function isLocalNetworkName(name: string): boolean {
+  return (
+    name.endsWith('.local') ||
+    name.endsWith('.lan') ||
+    name.endsWith('.internal') ||
+    name.endsWith('.home') ||
+    name.endsWith('.home.arpa')
+  );
+}
+
+function matchesAllowed(name: string, allowed: ReadonlySet<string>): boolean {
+  if (allowed.has(name)) return true;
+  for (const item of allowed) {
+    if (item.startsWith('*.') && (name === item.slice(2) || name.endsWith(item.slice(1)))) return true;
+  }
+  return false;
+}
+
 /**
  * Cabeçalho Host local (`localhost`, `*.localhost`, 127.x ou `[::1]`; porta ignorada)? Usado pelo terminal, pelas
  * permissões e pelas mensagens, que só atendem quem abriu o Habblaud pelo próprio computador: um IP da rede ou um nome
@@ -71,7 +90,7 @@ export function hostAllowed(host: string | undefined, allowed: ReadonlySet<strin
   if (allowed.has('*')) return true;
   const name = hostnameOf(host);
   if (!name) return false;
-  return isIP(name) !== 0 || isLoopbackName(name) || allowed.has(name);
+  return isIP(name) !== 0 || isLoopbackName(name) || isLocalNetworkName(name) || matchesAllowed(name, allowed);
 }
 
 /**
@@ -91,7 +110,7 @@ export function originAllowed(origin: string | undefined, host: string | undefin
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
   if (host !== undefined && url.host.toLowerCase() === host.trim().toLowerCase()) return true;
   const name = hostnameOf(url.host);
-  return !!name && (isLoopbackName(name) || allowed.has(name));
+  return !!name && (isLoopbackName(name) || isLocalNetworkName(name) || matchesAllowed(name, allowed));
 }
 
 export function isJsonContentType(value: string | undefined): boolean {

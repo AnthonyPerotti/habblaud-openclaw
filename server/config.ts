@@ -249,7 +249,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: string[] 
     openclawGatewayToken: env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined,
     dataDir: resolve(env.HABBLAUD_DATA_DIR?.trim() || (inDocker ? '/data' : join(home, '.habblaud'))),
     usageDir: resolve(env.HABBLAUD_USAGE_DIR?.trim() || join(home, '.habblaud', 'usage')),
-    allowedHosts: parseAllowedHosts(env.HABBLAUD_ALLOWED_HOSTS),
+    allowedHosts: parseAllowedHosts(env.HABBLAUD_ALLOWED_HOSTS?.trim() || (inDocker ? '*' : undefined)),
     terminal: terminalOffReason(env, host, inDocker) === undefined,
     messages: messagesOffReason(env, host, inDocker) === undefined,
     timeline: !env.HABBLAUD_TIMELINE?.trim() || isTruthy(env.HABBLAUD_TIMELINE),

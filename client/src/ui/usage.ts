@@ -12,7 +12,7 @@ import type { UiContext } from './context';
 import { h, KeyedList, setAttr, setHidden, setStyleVar, setText, setTitle, setVariant } from './dom';
 import { FIVE_HOURS_MS, relativeTime, usageLevel, usageWindowView, WEEK_MS, type UsageWindowView } from './format';
 import { ICONS } from './icons';
-import { isCodex } from './provider';
+import { isCodex, isOpenClaw } from './provider';
 import { usageRowFits } from './usage-row';
 import { createAccountChip, createProviderTag, updateAccountChip, updateProviderTag } from './widgets';
 import { tr } from '../../../shared/i18n';
@@ -337,12 +337,13 @@ export class UsageCards {
     const r = this.refs.get(card)!;
     const now = this.ctx.now();
     const codex = isCodex(a);
+    const openclaw = isOpenClaw(a);
     updateAccountChip(r.chip, a);
     setStyleVar(card, '--acc', a.color);
     setText(r.name, a.name);
-    updateProviderTag(r.prov, codex ? 'codex' : 'claude', a.name);
+    updateProviderTag(r.prov, openclaw ? 'openclaw' : codex ? 'codex' : 'claude', a.name);
     setText(r.email, usageSubtitle(a));
-    setAttr(card, 'aria-label', tr('{0}{1}: uso do plano', [a.name, codex ? ' (Codex)' : '']));
+    setAttr(card, 'aria-label', tr('{0}{1}: uso do plano', [a.name, codex ? ' (Codex)' : openclaw ? ' (OpenClaw)' : '']));
 
     const usage = a.usage;
     const state = cardState(a);
@@ -375,13 +376,13 @@ export class UsageCards {
       );
     }
 
-    // Sem números: "sem dados de uso" + "Como ativar" (no Codex, "Como funciona": não há o que instalar). Sem cota:
+    // Sem números: "sem dados de uso" + "Como ativar" (no Codex e OpenClaw não há o que instalar). Sem cota:
     // a mensagem, sem botão.
     const [msgLong, msgShort] = usageMessage(a);
     setText(r.msgLong, msgLong);
     setText(r.msgShort, msgShort);
     setHidden(r.msg, state !== 'empty' && state !== 'noquota');
-    setHidden(r.how, state === 'noquota');
+    setHidden(r.how, state === 'noquota' || openclaw);
     r.msg.classList.toggle('is-noquota', state === 'noquota');
     setTitle(r.msg, state === 'noquota' ? codexUsageNote(a, now) : '');
     setText(r.howLong, codex ? tr('Como funciona') : tr('Como ativar'));
@@ -393,9 +394,11 @@ export class UsageCards {
 
   private updateTip(r: CardRefs, a: AccountInfo, state: CardState, five: UsageWindowView | null, week: UsageWindowView | null, now: number): void {
     const codex = isCodex(a);
-    setText(r.tipTitle, `${a.name}${codex && !/codex/i.test(a.name) ? ' · Codex' : ''}${a.plan ? tr(' · plano {0}', [a.plan]) : ''}`);
+    const openclaw = isOpenClaw(a);
+    setText(r.tipTitle, `${a.name}${codex && !/codex/i.test(a.name) ? ' · Codex' : openclaw && !/openclaw/i.test(a.name) ? ' · OpenClaw' : ''}${a.plan ? tr(' · plano {0}', [a.plan]) : ''}`);
     const rows: [string, string][] = [];
     if (codex) rows.push([tr('Ferramenta'), 'Codex']);
+    else if (openclaw) rows.push([tr('Ferramenta'), 'OpenClaw']);
     if (a.email) rows.push(['E-mail', a.email]);
     if (a.organization) rows.push([tr('Organização'), a.organization]);
     if (a.plan) rows.push([tr('Plano'), a.plan]);
@@ -405,18 +408,27 @@ export class UsageCards {
     if (u && (u.fiveHour || u.sevenDay)) {
       rows.push([tr('Sessão de 5 h'), five?.summary ?? '—']);
       rows.push([tr('Semana'), week?.summary ?? '—']);
-      // Opus e Sonnet são janelas do Claude: no Codex não existem.
-      const opus = codex ? null : usageWindowView(u.sevenDayOpus, u.fetchedAt, now, WEEK_MS);
-      const sonnet = codex ? null : usageWindowView(u.sevenDaySonnet, u.fetchedAt, now, WEEK_MS);
+      // Opus e Sonnet são janelas do Claude: no Codex e OpenClaw não existem.
+      const opus = codex || openclaw ? null : usageWindowView(u.sevenDayOpus, u.fetchedAt, now, WEEK_MS);
+      const sonnet = codex || openclaw ? null : usageWindowView(u.sevenDaySonnet, u.fetchedAt, now, WEEK_MS);
       if (opus) rows.push([tr('Opus (semana)'), opus.summary]);
       if (sonnet) rows.push([tr('Sonnet (semana)'), sonnet.summary]);
     }
     if (u && state === 'noquota') rows.push([tr('Cota'), tr('sem cota nem créditos agora')]);
-    if (u && (state !== 'empty' || codex)) {
+    if (u && (state !== 'empty' || codex || openclaw)) {
       rows.push([tr('Origem'), sourceLabel(u)]);
       rows.push([tr('Atualizado'), relativeTime(u.fetchedAt, now)]);
     }
     syncRows(r.tipRows, rows);
+
+    // OpenClaw: o uso é sincronizado automaticamente pelo OpenClaw (sem os passos de mod/tap do Claude Code).
+    if (openclaw) {
+      const note = tr('Conta do OpenClaw: o status e sessões são sincronizados automaticamente.');
+      setText(r.tipNote, note);
+      setHidden(r.tipNote, !note);
+      setHidden(r.tipSetup, true);
+      return;
+    }
 
     // Codex: a explicação dele, sem o passo a passo do Claude Code (não há o que instalar para o uso).
     if (codex) {

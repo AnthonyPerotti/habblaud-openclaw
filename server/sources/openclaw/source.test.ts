@@ -26,6 +26,7 @@ describe('OpenClawSource full sync test', () => {
         model: 'deepseek-flash',
         modelProvider: 'deepseek',
         totalTokens: 128625,
+        label: 'Análise de Logs',
       },
       {
         key: 'agent:main:dashboard:subagent-child',
@@ -38,6 +39,7 @@ describe('OpenClawSource full sync test', () => {
         model: 'gemini-3-flash-preview',
         modelProvider: 'google',
         totalTokens: 3000,
+        label: 'Worker de Teste',
       },
     ];
 
@@ -62,7 +64,7 @@ describe('OpenClawSource full sync test', () => {
       terminal: true,
       permissions: () => new Map(),
       ptys: () => ({ status: { enabled: false, reason: 'test' }, list: [] }),
-      updates: () => ({ enabled: false }),
+      updates: () => ({ state: 'off', available: false }),
       world: () => ({ enabled: false, configured: false, state: 'off' }),
     });
 
@@ -82,9 +84,42 @@ describe('OpenClawSource full sync test', () => {
     const subAgent = agents.find((a) => a.kind === 'sub');
 
     expect(mainAgent).toBeDefined();
-    expect(mainAgent?.role).toContain('deepseek-flash');
+    expect(mainAgent?.role).toContain('Análise de Logs');
     expect(subAgent).toBeDefined();
+    expect(subAgent?.title).toBe('Worker de Teste');
     expect(subAgent?.parentId).toBe('openclaw:agent:main:dashboard:e98cd445-e9ca-47ea-92a9-4d4ce8a22468');
+
+    // Test session deletion: when session is deleted from state, it must be closed (arming removeAt)
+    writeFileSync(join(tmpDir, 'state', 'sessions.json'), JSON.stringify([sampleSessions[0]], null, 2), 'utf8');
+    await source.syncSessions();
+    const subDetail = office.detail('openclaw:agent:main:dashboard:subagent-child');
+    expect(subDetail?.agent.status).toBe('done');
+
+    // Test kind transition: session key previously main becomes sub
+    const transitionedSessions: OpenClawSession[] = [
+      sampleSessions[0],
+      {
+        key: 'agent:main:dashboard:transition-session',
+        sessionId: 'transition-uuid',
+        spawnDepth: 0,
+        status: 'active',
+        model: 'deepseek-flash',
+      },
+    ];
+    writeFileSync(join(tmpDir, 'state', 'sessions.json'), JSON.stringify(transitionedSessions, null, 2), 'utf8');
+    await source.syncSessions();
+    expect(office.detail('openclaw:agent:main:dashboard:transition-session')?.agent.kind).toBe('main');
+
+    // Now it transitions to sub of session 0
+    transitionedSessions[1] = {
+      ...transitionedSessions[1],
+      parentSessionKey: sampleSessions[0].key,
+      spawnDepth: 1,
+      label: 'Sub Subordinado',
+    };
+    writeFileSync(join(tmpDir, 'state', 'sessions.json'), JSON.stringify(transitionedSessions, null, 2), 'utf8');
+    await source.syncSessions();
+    expect(office.detail('openclaw:agent:main:dashboard:transition-session')?.agent.kind).toBe('sub');
 
     source.stop();
     rmSync(tmpDir, { recursive: true, force: true });

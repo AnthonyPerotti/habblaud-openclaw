@@ -8,7 +8,7 @@ import type { DayStatsService } from '../history/daystats';
 import type { Office } from '../model/office';
 import type { CodexLive } from '../sources/codex/live';
 import type { SessionLookup } from '../sources/source';
-import { isJsonContentType, isLoopbackHost } from './guard';
+import { hostAllowed, isJsonContentType, isLoopbackHost } from './guard';
 import type { RemoteFeature } from './remote';
 import { handleSessionsRoute } from './sessions';
 import type { Hub } from './sse';
@@ -30,6 +30,7 @@ export interface ApiDeps {
   sources: () => SourceInfo[];
   version: string;
   inDocker: boolean;
+  allowedHosts?: ReadonlySet<string>;
   /** Terminal ligado (ServerConfig.terminal: só com bind local). */
   terminal?: boolean;
   /** Streams do terminal; sem eles o recurso fica desligado mesmo com `terminal`. */
@@ -265,12 +266,14 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
   const terminals = deps.terminal ? deps.terminals : undefined;
 
   const isRemote = (req: IncomingMessage): boolean => !!deps.remote?.is(req);
+  const isTrustedHost = (host: string | undefined): boolean =>
+    isLoopbackHost(host) || (deps.inDocker && hostAllowed(host, deps.allowedHosts ?? new Set(['*'])));
   /**
    * A trava "pelo próprio computador": na porta local, o Host precisa ser loopback (como antes); na porta remota, só o
    * que HABBLAUD_REMOTE_ALLOW liberar (`feature` ausente = nunca pela porta remota).
    */
   const trusted = (req: IncomingMessage, feature?: RemoteFeature): boolean =>
-    isRemote(req) ? !!feature && !!deps.remote?.allows(feature) : isLoopbackHost(req.headers.host);
+    isRemote(req) ? !!feature && !!deps.remote?.allows(feature) : isTrustedHost(req.headers.host);
   const denied = (req: IncomingMessage, localMessage: string): string =>
     isRemote(req) ? tr('não liberado no acesso remoto (veja HABBLAUD_REMOTE_ALLOW)') : localMessage;
 
@@ -344,7 +347,7 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
       if (!deps.world) {
         req.resume();
         sendJson(res, 404, { error: tr('rota desconhecida') });
-      } else if (isRemote(req) || !isLoopbackHost(req.headers.host)) {
+      } else if (isRemote(req) || !isTrustedHost(req.headers.host)) {
         req.resume();
         sendJson(res, 403, { error: { code: 'local_only', message: tr('o Habblaud World só é usado pelo próprio computador (http://localhost)') } });
       } else deps.world(req, res, url);
@@ -393,12 +396,12 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
         const remote = isRemote(req);
         const access: AccessInfo = {
           remote,
-          local: !remote && isLoopbackHost(req.headers.host),
+          local: !remote && isTrustedHost(req.headers.host),
           permissions: !!deps.permissions && trusted(req, 'permissions'),
           messages: !!deps.messages && trusted(req, 'messages'),
           terminal: !!terminals && trusted(req, 'terminal'),
           spawn: !!deps.spawn && trusted(req, 'spawn'),
-          world: !!deps.world && !!deps.terminal && !remote && isLoopbackHost(req.headers.host),
+          world: !!deps.world && !!deps.terminal && !remote && isTrustedHost(req.headers.host),
         };
         sendJson(res, 200, access);
       }
@@ -436,7 +439,7 @@ export function createApiHandler(deps: ApiDeps): (req: IncomingMessage, res: Ser
       handleSessionsRoute(req, res, path, {
         history: deps.terminal ? deps.sessions : undefined,
         terminals,
-        trusted: isRemote(req) ? trusted(req, 'terminal') : undefined,
+        trusted: trusted(req, 'terminal'),
       });
       return true;
     }

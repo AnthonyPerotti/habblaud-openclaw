@@ -317,10 +317,14 @@ export class Office {
     const now = this.now();
     const existing = this.agents.get(p.id);
     if (existing) {
-      // Sessão que voltou durante o período de graça.
-      delete existing.removeAt;
-      this.setStatus(p.id, p.status, p.waitingFor);
-      return;
+      if (existing.info.kind !== 'main') {
+        this.agents.delete(p.id);
+      } else {
+        // Sessão que voltou durante o período de graça.
+        delete existing.removeAt;
+        this.setStatus(p.id, p.status, p.waitingFor);
+        return;
+      }
     }
     const roomId = normalizeCwd(p.cwd);
     this.ensureRoom(roomId, now);
@@ -586,8 +590,12 @@ export class Office {
     const now = this.now();
     const existing = this.agents.get(p.id);
     if (existing) {
-      this.reactivateSub(p.id);
-      return true;
+      if (existing.info.kind !== 'sub') {
+        this.agents.delete(p.id);
+      } else {
+        this.reactivateSub(p.id);
+        return true;
+      }
     }
     const person = this.deps.names.assign(p.id, this.takenNames());
     const info: AgentInfo = {

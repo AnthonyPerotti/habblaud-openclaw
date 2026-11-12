@@ -416,7 +416,8 @@ describe('guarda de Host/Origin', () => {
 
   it('Host: IPs, localhost e liberados sim; domínios de fora não', () => {
     expect(hostAllowed(undefined, allowed)).toBe(true);
-    for (const h of ['localhost:4747', 'app.localhost', '127.0.0.1:4747', '[::1]:1', '10.0.0.5:4747', 'meu-mac.local:4747']) expect(hostAllowed(h, allowed)).toBe(true);
+    for (const h of ['localhost:4747', 'app.localhost', '127.0.0.1:4747', '[::1]:1', '10.0.0.5:4747', 'meu-mac.local:4747', 'habblaud.zima.local', 'servidor.lan']) expect(hostAllowed(h, allowed)).toBe(true);
+    expect(hostAllowed('habblaud.zima.local', new Set())).toBe(true);
     for (const h of ['attacker.example:4747', 'localhost.attacker.example', '127.0.0.1.nip.io', '', 'x y']) expect(hostAllowed(h, allowed)).toBe(false);
   });
 

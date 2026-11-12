@@ -1,6 +1,6 @@
 // Reader for OpenClaw session SQLite database and state files.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { gunzipSync, inflateSync } from 'node:zlib';
 import type { OpenClawSession, OpenClawSessionsPayload } from './types';
 import { log } from '../../log';
@@ -99,7 +99,15 @@ export async function readSessionsFromDb(dbPath: string): Promise<OpenClawSessio
 
   let db: any = null;
   try {
-    db = new DatabaseClass(dbPath, { readOnly: true });
+    try {
+      db = new DatabaseClass(dbPath, { readOnly: true });
+    } catch {
+      // In Docker with read-only bind mount (:ro), WAL mode cannot write to -shm.
+      // Fallback to SQLite immutable URI mode.
+      const absPath = resolve(dbPath).replace(/\\/g, '/');
+      const uri = `file:${absPath}?immutable=1`;
+      db = new DatabaseClass(uri, { readOnly: true });
+    }
 
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
     const tableNames = new Set(tables.map((t) => t.name));
@@ -135,6 +143,8 @@ export async function readSessionsFromDb(dbPath: string): Promise<OpenClawSessio
         const startedAt = Number(payload?.sessionStartedAt || payload?.createdAt || row.created_at || Date.now());
         const lastAt = Number(payload?.lastInteractionAt || payload?.updatedAt || row.updated_at || startedAt);
 
+        const label = (typeof row.label === 'string' && row.label.trim()) || payload?.label || payload?.title || undefined;
+
         sessionMap.set(sid, {
           key,
           sessionId: sid,
@@ -150,7 +160,7 @@ export async function readSessionsFromDb(dbPath: string): Promise<OpenClawSessio
           inputTokens: payload?.inputTokens || payload?.tokens?.input,
           outputTokens: payload?.outputTokens || payload?.tokens?.output,
           agentId: payload?.agentId || String(row.agent_id || 'main'),
-          label: payload?.label || payload?.title || undefined,
+          label,
         });
       }
 
@@ -200,6 +210,7 @@ export async function readSessionsFromDb(dbPath: string): Promise<OpenClawSessio
           outputTokens: typeof row.outputTokens === 'number' ? row.outputTokens : typeof row.output_tokens === 'number' ? row.output_tokens : undefined,
           contextTokens: typeof row.contextTokens === 'number' ? row.contextTokens : typeof row.context_tokens === 'number' ? row.context_tokens : undefined,
           agentId: typeof row.agentId === 'string' ? row.agentId : typeof row.agent_id === 'string' ? row.agent_id : 'main',
+          label: typeof row.label === 'string' ? row.label : typeof row.title === 'string' ? row.title : undefined,
         });
       }
 

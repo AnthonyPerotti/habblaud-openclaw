@@ -1,82 +1,159 @@
 <p align="center">
-  <b>English</b> · <a href="README.pt-BR.md">Português</a>
+  <img src="client/public/assets/brand/logo-mark@4x.png" width="96" alt="Habblaud logo: pixel art building" />
 </p>
 
 # Habblaud OpenClaw
 
 Virtual pixel art office dashboard for OpenClaw autonomous agents, sessions, and workflows.
 
+<p align="center">
+  <img src="docs/screenshots/office.gif" width="820" alt="Animation of Habblaud office: agents typing at desks, subagents moving between rooms and activity bubbles" />
+</p>
+
 ## Overview
 
-Habblaud OpenClaw is a real-time visualization dashboard and management interface for OpenClaw runtimes. It maps OpenClaw agents, subagents, and sessions to characters in an interactive virtual pixel art office. Each active session occupies a desk, navigates between rooms representing project workspaces, and displays real-time activity, thinking states, tool invocations, token metrics, and execution history.
+Habblaud OpenClaw is a real-time visualization dashboard and operational office for OpenClaw runtimes. It maps autonomous OpenClaw agents, subagents, and sessions to characters in an interactive virtual pixel art building.
 
-The system is built on a lightweight, zero-runtime-dependency Node.js core that streams state via Server-Sent Events (SSE) to an HTML5 Canvas and TypeScript frontend.
+Each active session occupies an assigned desk, navigates between rooms representing project workspaces, and displays real-time activity, thinking states, tool invocations, token metrics, and execution history.
 
-## Architecture
+The system is built on a zero-runtime-dependency Node.js core that streams state via Server-Sent Events (SSE) to an HTML5 Canvas and TypeScript frontend.
 
-The following diagram illustrates data flow and component boundaries:
+## Visual Tour
 
-```
-+-------------------------------------------------------------+
-|                      Host Environment                       |
-|                                                             |
-|  +---------------------------+                              |
-|  |     OpenClaw Runtime      |                              |
-|  |                           |                              |
-|  |  SQLite Databases:        |                              |
-|  |  - openclaw-agent.sqlite  |                              |
-|  |  - state/openclaw.sqlite  |                              |
-|  |  (Tables: session_nodes)  |                              |
-|  +-------------+-------------+                              |
-|                |                                            |
-|                | Read-Only Volume Mount                     |
-|                v                                            |
-|  +-------------------------------------------------------+  |
-|  |              Habblaud Container (Docker)              |  |
-|  |                                                       |  |
-|  |  +-------------------------------------------------+  |  |
-|  |  | Ingestion Layer                                 |  |  |
-|  |  | - SQLite Reader (session_nodes / entry_json)    |  |  |
-|  |  | - Recursive FS Watcher (state synchronization)  |  |  |
-|  |  | - Gateway Client (optional HTTP/WebSocket)      |  |  |
-|  |  +------------------------+------------------------+  |  |
-|  |                           |                           |  |
-|  |  +------------------------v------------------------+  |  |
-|  |  | Office Core Engine                              |  |  |
-|  |  | - Room assignment and spatial layout            |  |  |
-|  |  | - Agent status state machine                    |  |  |
-|  |  | - SSE Event Hub (/api/stream, /api/snapshot)    |  |  |
-|  |  +------------------------+------------------------+  |  |
-|  |                           |                           |  |
-|  |  +------------------------v------------------------+  |  |
-|  |  | HTTP Server & Edge Guard                        |  |  |
-|  |  | - DNS Rebinding & CSRF Protection               |  |  |
-|  |  | - Terminal Streamer & Session Inspector         |  |  |
-|  |  +-------------------------------------------------+  |  |
-|  +---------------------------+---------------------------+  |
-+------------------------------|------------------------------+
-                               | HTTP / SSE (:4747)
-                               v
-                     +-------------------+
-                     | Web Browser / NPM |
-                     | Pixel Art Canvas  |
-                     +-------------------+
-```
+### Building Overview
+
+The building includes a reception lobby with working elevators, restrooms, a kitchen breakroom, a recreational lounge, and modular project rooms along the hallway. At the top, session and token counters display resource usage. On the left, the drawer lists rooms and agents. At the bottom, a live event feed streams actions.
+
+![Habblaud overview: building with lobby, kitchen, restrooms, lounge and project rooms](docs/screenshots/overview.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/agent-details.png" alt="Details drawer of an agent with tasks, subagents, timeline and stats" /></td>
+    <td width="50%"><img src="docs/screenshots/night.png" alt="The office at night, with streetlights on and lit rooms" /></td>
+  </tr>
+  <tr>
+    <td><b>Agent Details:</b> Inspect running status, model specifications, subagent trees, token consumption, and execution history.</td>
+    <td><b>Day and Night Cycle:</b> Office lighting, window sky colors, and outdoor street lamps adjust dynamically to local time.</td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="42%"><img src="docs/screenshots/collab.png" alt="Subagent delivering results to the main agent" /></td>
+    <td width="58%">
+      <b>Collaboration in Plain Sight.</b> When OpenClaw spawns child sessions (subagents), coworkers arrive by elevator with distinct names and badges. They navigate to the project desk, process tasks, and walk over to the parent agent to deliver results before leaving.<br /><br />
+      <b>Interactive Inquiries.</b> When an agent requires user input or approval, it moves to its desk and raises an alert banner. Notifications can be configured with browser prompts and audio cues.
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <td width="58%">
+      <b>Long-Running Shell Execution.</b> When an agent launches long-running builds, test suites, or background processes, it remains at its desk with progress indicators and command labels. As execution proceeds, visual animations adapt based on elapsed time.
+    </td>
+    <td width="42%"><img src="docs/screenshots/shell-wait.png" alt="Agent waiting at desk with execution progress bubble" /></td>
+  </tr>
+</table>
+
+### Dynamic Room Lifecycle
+
+Rooms are generated dynamically as OpenClaw sessions are spawned across workspace directories. When all sessions in a project conclude, the room transitions cleanly through its lifecycle:
+
+| 1. Room setup | 2. Active work | 3. Last session completes | 4. Lot converted to garden |
+| --- | --- | --- | --- |
+| ![Room being set up with furniture](docs/screenshots/lifecycle-1.png) | ![Lit room with agents working](docs/screenshots/lifecycle-2.png) | ![Lights off after agents leave](docs/screenshots/lifecycle-3.png) | ![Lot transformed into garden](docs/screenshots/lifecycle-4.png) |
+
+<table>
+  <tr>
+    <td width="34%"><img src="docs/screenshots/mobile.png" alt="Habblaud responsive interface on mobile" /></td>
+    <td>
+      <b>Mobile and Tablet Ready.</b> The interface adapts responsively to mobile and tablet screens. Resource metrics remain accessible at the top, the room directory collapses into a slide-out drawer, and agent detail sheets expand smoothly from the bottom.
+    </td>
+  </tr>
+</table>
+
+## Key Features
+
+### Office Themes
+
+The office supports seasonal and custom visual styles, accessible in Settings -> Appearance:
+
+- **Automatic:** Follows calendar seasons based on local time.
+- **Original:** Classic corporate pixel art palette.
+- **Christmas:** Holiday decorations, seasonal rugs, and festive character hats.
+- **Halloween:** Jack-o-lanterns, decorative cobwebs, and themed costumes.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/seasonal-christmas.png" alt="Office with Christmas holiday theme" /></td>
+    <td width="50%"><img src="docs/screenshots/seasonal-halloween.png" alt="Office with Halloween holiday theme" /></td>
+  </tr>
+</table>
+
+### GitHub Workflows in the Office
+
+When OpenClaw agents execute git commands, pull requests, or CI checks, the room reflects deployment events in real time:
+
+- **PR Created or Merged:** Confetti celebration and announcement banner in the project room.
+- **CI Failure:** Flashing warning beacons and alert indicators over the responsible agent.
+- **Branch Push:** Live status notices and stream entries.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/github-party.png" alt="Room celebration on PR merge" /></td>
+    <td width="50%"><img src="docs/screenshots/github-alarm.png" alt="Room alert on CI failure" /></td>
+  </tr>
+</table>
+
+### Office Social Life and Break Areas
+
+When agents are idle or waiting between execution cycles, they gather in common areas based on randomized personality traits:
+
+<p align="center">
+  <img src="docs/screenshots/social-lounge.gif" width="816" alt="Lounge activities: arcade machine, sofa TV, and table tennis" />
+</p>
+
+- **Lounge TV and Arcade:** Characters watch sports, play split-screen games, or challenge each other at arcade cabinets.
+- **Table Tennis:** Interactive ping-pong matches with score tracking.
+- **Kitchen and Coffee Station:** Informal breaks with dialogue bubbles referencing project activity.
+- **Coin Minigames:** Rock-paper-scissors challenges with coin transfers and leaderboards.
+- **Restroom Mirrors:** Characters freshen up with reflected avatar sprites.
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/social-rps.png" alt="Rock paper scissors challenge in the lobby" /></td>
+    <td width="50%"><img src="docs/screenshots/social-kitchen.png" alt="Agents conversing in the kitchen" /></td>
+  </tr>
+  <tr>
+    <td><b>Mini Challenges:</b> Wagers scaled to agent personality traits.</td>
+    <td><b>Kitchen Conversations:</b> Idle dialogues reflecting work events.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/social-mirror.png" alt="Agents at the restroom mirror" /></td>
+    <td><img src="docs/screenshots/social-drawer.png" alt="Social profile and stats in the agent drawer" /></td>
+  </tr>
+  <tr>
+    <td><b>Restroom Mirrors:</b> Interactive reflections and vanity animations.</td>
+    <td><b>Social Profile:</b> Track records, wallet balance, and peer relationships.</td>
+  </tr>
+</table>
 
 ### Core Components
 
-1. Ingestion Layer (`server/sources/openclaw/`):
-   - SQLite Reader: Directly reads `openclaw-agent.sqlite` and `openclaw.sqlite` in read-only mode (`node:sqlite`). Supports the current OpenClaw schema (`session_nodes` table with compressed or flat `entry_json` payloads) as well as fallback tables.
-   - Filesystem Watcher: Observes changes in the OpenClaw data directory with error isolation to prevent unhandled `EACCES` crashes on restricted files.
-   - Gateway Adapter: Connects to the OpenClaw Gateway API (`/api/sessions`) when configured.
+1. **Ingestion Layer (`server/sources/openclaw/`):**
+   - **SQLite Reader:** Directly inspects `openclaw-agent.sqlite` and `openclaw.sqlite` in read-only mode using `node:sqlite`. Extracts rows from `session_nodes` (with decompression of `entry_json` and direct extraction of the `label` column) and handles fallback schemas.
+   - **Immutable URI Fallback:** When reading databases mounted read-only (`:ro`) in Docker, automatically switches to `file:... ?immutable=1` to avoid SQLite WAL `-shm` write lock failures.
+   - **Filesystem Watcher:** Observes directory changes with error containment to prevent unhandled `EACCES` crashes on restricted files.
 
-2. Office Engine (`server/model/`):
-   - Models the office rooms, desks, character avatars, and state machines (`working`, `waiting`, `shell`, `idle`).
-   - Tracks token counts (input, output, context), execution durations, and model configurations.
+2. **Office Engine (`server/model/`):**
+   - Manages room coordinates, furniture slots, avatar assignments, and activity states (`working`, `waiting`, `shell`, `idle`).
+   - Automatically cleans up deleted sessions using `closeMain()` and `completeSub()` with grace periods, preventing orphaned ghost agents.
+   - Tracks token counts, execution durations, and model configurations.
 
-3. Frontend (`client/`):
-   - Pixel art rendering engine with automatic room scaling, viewport centering, and character pathfinding.
-   - Agent inspection drawer with live logs, tool calls, and model metadata.
+3. **Frontend (`client/`):**
+   - Canvas-based isometric pixel engine with dynamic camera framing, pathfinding, and sprite caching.
+   - Detailed inspection drawer with live transcripts, task checklists, and model metadata.
 
 ## Deployment
 
@@ -105,7 +182,7 @@ services:
       OPENCLAW_GATEWAY_TOKEN: ""
       HABBLAUD_BIND: "0.0.0.0"
       HABBLAUD_PORT: "4747"
-      HABBLAUD_ALLOWED_HOSTS: "habblaud.zima.local,localhost,127.0.0.1"
+      HABBLAUD_ALLOWED_HOSTS: "*"
       HABBLAUD_LANG: "pt"
       HABBLAUD_WORLD: "0"
     extra_hosts:
@@ -129,21 +206,18 @@ volumes:
 docker compose up -d --build
 ```
 
-Access the dashboard at `http://<HOST_IP>:4747` or through your configured domain.
+Access the dashboard at `http://<HOST_IP>:4747` or through your local domain name.
 
 ## Reverse Proxy Configuration (Nginx Proxy Manager)
 
 When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 
-1. Add your domain (for example, `habblaud.zima.local`) to the `HABBLAUD_ALLOWED_HOSTS` environment variable:
-   ```env
-   HABBLAUD_ALLOWED_HOSTS=habblaud.zima.local
-   ```
-2. In Nginx Proxy Manager:
+1. In your proxy configuration:
    - Scheme: `http`
-   - Forward Hostname / IP: `<ZIMAOS_OR_DOCKER_HOST_IP>`
+   - Forward Hostname / IP: `<HOST_IP>`
    - Forward Port: `4747`
-   - Enable `Websockets Support` (required for real-time SSE and stream transport).
+   - Enable **Websockets Support** (required for real-time SSE stream transport).
+2. The server guard automatically trusts local domains (`.local`, `.lan`, `.internal`, `.home`). For external public domains, specify them in `HABBLAUD_ALLOWED_HOSTS`.
 
 ## Environment Variables
 
@@ -154,9 +228,9 @@ When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 | `OPENCLAW_GATEWAY_TOKEN` | Bearer token for OpenClaw Gateway authentication | Unset |
 | `HABBLAUD_PORT` | HTTP port exposed by the Node server | `4747` |
 | `HABBLAUD_BIND` | Bind host address (`0.0.0.0` for all interfaces) | `0.0.0.0` |
-| `HABBLAUD_ALLOWED_HOSTS` | Comma-separated domain names for DNS rebinding protection | `localhost` |
+| `HABBLAUD_ALLOWED_HOSTS` | Accepted host headers (`*` allowed in Docker) | `*` in Docker, `localhost` outside |
 | `HABBLAUD_LANG` | UI language (`pt`, `en`, `es`, `fr`) | `pt` |
-| `HABBLAUD_DEMO` | Enable simulated test agents | `0` |
+| `HABBLAUD_DEMO` | Enable simulated demo agents | `0` |
 | `HABBLAUD_TERMINAL` | Enable agent terminal inspection | `1` |
 | `HABBLAUD_WORLD` | Enable Habblaud World community uplink | `0` |
 
@@ -165,28 +239,25 @@ When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 ### Host Not Allowed (403 Forbidden)
 
 If you see:
-`Host não permitido: habblaud.zima.local. Abra o Habblaud por http://localhost (ou pelo IP) ou libere o nome em HABBLAUD_ALLOWED_HOSTS.`
+`Host não permitido: <domain>. Abra o Habblaud por http://localhost ou libere o nome em HABBLAUD_ALLOWED_HOSTS.`
 
-- Cause: Habblaud includes DNS Rebinding protection. By default, it accepts only IP addresses and `localhost`. Wildcard values (`*`) are now supported, but explicit domains are recommended.
-- Fix: Set `HABBLAUD_ALLOWED_HOSTS=habblaud.zima.local` in `docker-compose.yml`.
+- **Cause:** Habblaud includes DNS Rebinding protection.
+- **Fix:** Set `HABBLAUD_ALLOWED_HOSTS=*` or specify your domain (e.g. `habblaud.zima.local`) in the environment variables. The server automatically permits `.local` and `.lan` domains by default.
 
-### Terminal Unavailable Warning
+### SQLite WAL Mode on Read-Only Mount (`unable to open database file`)
 
-If the agent drawer displays:
-`O terminal só fica disponível quando o Habblaud roda com acesso local (bind 127.0.0.1)`
+- **Cause:** In Docker, mounting the state volume with `:ro` prevents SQLite in WAL mode from writing to the `-shm` lockfile.
+- **Fix:** The OpenClaw reader automatically falls back to URI mode (`file:... ?immutable=1`), allowing reads without shared memory file locks.
 
-- Cause: The live session transcript feature contains conversation history and commands. For safety, the engine disables this feature when `HABBLAUD_BIND` is set to a non-loopback network address (`0.0.0.0`).
-- Fix: If running locally without a network bridge, bind to `127.0.0.1`. In homelab proxy setups, access the service via localhost port forwarding or review access controls.
+### Task Label Falling Back to `Tarefa (dashboard)`
 
-### Permissions Crash (EACCES) on Filesystem Watcher
+- **Cause:** OpenClaw stores session labels in the `session_nodes.label` column rather than inside the JSON payload.
+- **Fix:** The database extractor checks both the database column and payload fields, ensuring labels display properly.
 
-- Cause: Backup or configuration files in the OpenClaw state directory created by root processes (such as `openclaw.json.bak-*` with `600` permissions) cannot be read by the container user. When `fs.watch` encounters permission barriers without an explicit `error` handler, Node.js terminates the process.
-- Fix: Ensure files in `OPENCLAW_HOME` are owned by the container user UID (1000:1000). The source watcher now includes isolated error event handlers to prevent container crashes.
+### Stale Ghost Agents Remaining Offline
 
-### Zero Sessions Detected (`ok: true, sessions: 0`)
-
-- Cause: OpenClaw persists agent nodes and graph executions in the `session_nodes` SQLite table, using compressed JSON payloads (`entry_json`), rather than legacy `sessions` tables.
-- Fix: Ensure the OpenClaw SQLite database path is mounted and that the database reader evaluates `session_nodes` with decompression support.
+- **Cause:** Calling only `setStatus('offline')` does not arm the garbage collection timestamp (`removeAt`).
+- **Fix:** When sessions are deleted from SQLite or the state index, `closeMain()` and `completeSub()` are called to schedule clean removal after the grace period.
 
 ## Local Development
 
