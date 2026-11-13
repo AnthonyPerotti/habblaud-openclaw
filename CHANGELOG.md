@@ -12,6 +12,7 @@ do meio (0.**3**.0).
 
 ### Adicionado
 
+- **Ciclo de sono baseado em horários.** Os agentes não dormem mais na frente do PC durante o dia (07:00 às 18:00). Entre 18:00 e 22:00 podem começar a cochilar após ficarem ociosos, mas acordam para interagir e passear. Entre 22:00 e 07:00 entram em sono profundo: voltam a dormir rapidamente após concluir tarefas e só acordam se houver serviço, despertando em definitivo às 07:00.
 - **Edição de personagem para subagentes.** Agora é possível customizar a aparência e o nome dos subagentes no painel de detalhes do agente (lápis ao lado do nome). Diferente dos agentes principais (cujo personagem fica gravado para o projeto/sala), a customização do subagente é mantida na sessão atual sem interferir na sala do projeto.
 
 ### Corrigido

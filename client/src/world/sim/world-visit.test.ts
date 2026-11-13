@@ -225,11 +225,12 @@ describe('Sim da visita (visit: true)', () => {
       expect(sim.longIdle(ch, clock.now)).toBe(false);
       expect(ch.icon).not.toBe('zzz');
     }
-    // o mesmo prédio fora da visita: 40 min de espera viram cochilo com teia
+    // o mesmo prédio fora da visita: à noite (após 18h), 40 min de espera viram cochilo
     const office = newSim();
-    const snap = officeFromBuilding(sampleBuildingDetail(), T0, OPTS);
-    office.applySnapshot(snap, T0);
-    const c2 = { now: T0 };
+    const tEvening = new Date(2026, 9, 14, 19, 0, 0).getTime();
+    const snap = officeFromBuilding(sampleBuildingDetail(), tEvening, OPTS);
+    office.applySnapshot(snap, tEvening);
+    const c2 = { now: tEvening };
     run(office, c2, 2);
     c2.now += 40 * 60_000;
     run(office, c2, 1);

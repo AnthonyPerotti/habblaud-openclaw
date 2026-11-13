@@ -19,7 +19,11 @@ import { browserStorage, type StorageLike } from '../social/wallet';
 import {
   canDismantle,
   chooseSeat,
+  hourOfDay,
   idleSitMs,
+  isDaytime,
+  isDeepNight,
+  isEvening,
   isLastInRoom,
   isLongIdle,
   modeFor,
@@ -601,8 +605,17 @@ export class Sim {
       if (ch.info.kind === 'sub' && !ch.leaving) this.refreshMode(ch);
       // comando em primeiro plano passou dos 10 s (ou a espera acabou): muda de modo sem snapshot novo
       else if (!ch.leaving && (ch.mode === 'shell' || (ch.info.status === 'working' && ch.info.shells?.length))) this.refreshMode(ch);
-      if (ch.mode === 'idle' && this.longIdle(ch, now) && ch.atSpot === ch.homeSpot && ch.pose === 'sleep' && ch.icon !== 'zzz') {
-        ch.setIcon('zzz', 1e12, now);
+      if (ch.mode === 'idle') {
+        const sleep = this.longIdle(ch, now);
+        if (sleep && ch.atSpot === ch.homeSpot) {
+          if (ch.pose === 'sleep' && ch.icon !== 'zzz') {
+            ch.setIcon('zzz', 1e12, now);
+          }
+        } else if (!sleep) {
+          // Se não é horário de dormir (ex.: amanheceu às 7h), acorda o personagem
+          if (ch.pose === 'sleep') ch.setPose('sit');
+          if (ch.icon === 'zzz') ch.setIcon(null, 0, now);
+        }
       }
     }
     if (this.shrinkPending) this.relayout();
@@ -1201,11 +1214,24 @@ export class Sim {
     }
     if (ch.atSpot !== ch.homeSpot) return this.planGoHome(ch, now);
     ch.arriving = false;
-    if (ch.mode === 'idle' && !this.longIdle(ch, now)) {
+    const h = hourOfDay(now);
+    const sleeping = this.longIdle(ch, now);
+    // De madrugada (22h-07h): sono profundo. Não acordam para passeios/social (só acordam se houver task).
+    if (isDeepNight(h)) {
+      return false;
+    }
+    // Horário comercial (07h-18h): acordados. Horário noturno (18h-22h): podem dormir, mas podem acordar para interagir.
+    if (ch.mode === 'idle') {
       if (!ch.nextOutingAt) ch.nextOutingAt = now + idleSitMs(ch.rng, this.options().liveliness);
       if (now >= ch.nextOutingAt) {
+        // Se estiver cochilando (18h-22h), acorda para interagir
+        if (sleeping) {
+          ch.setPose('sit');
+          if (ch.icon === 'zzz') ch.setIcon(null, 0, now);
+        }
         if (this.planOuting(ch, now)) return true;
-        ch.nextOutingAt = now + idleSitMs(ch.rng, this.options().liveliness);
+        const mult = isEvening(h) ? 2.5 : 1;
+        ch.nextOutingAt = now + idleSitMs(ch.rng, this.options().liveliness) * mult;
       }
     }
     // esperando um shell: só sai da mesa para uma roda (sozinho, fica na pipoca)
@@ -1560,7 +1586,7 @@ export class Sim {
         if (!s || !this.reserveTemp(ch, s)) return false;
         this.pushLeave(ch, steps);
         steps.push({ t: 'go', tx: s.tx, ty: s.ty }, { t: 'enter', spot: s.id });
-        if (rng() < (hasTrait(persona, 'sonecas') ? 0.7 : 0.25)) steps.push({ t: 'act', pose: 'sit', ms: between(rng, 3000, 6000) }, { t: 'act', pose: 'sleep', ms: between(rng, 8000, 16000), icon: 'zzz' });
+        if (!isDaytime(hourOfDay(now)) && rng() < (hasTrait(persona, 'sonecas') ? 0.7 : 0.25)) steps.push({ t: 'act', pose: 'sit', ms: between(rng, 3000, 6000) }, { t: 'act', pose: 'sleep', ms: between(rng, 8000, 16000), icon: 'zzz' });
         else steps.push({ t: 'act', pose: 'sit', ms: between(rng, 9000, 22000), icon: rng() < 0.3 ? 'music' : undefined });
         steps.push({ t: 'exit' });
         release(s);

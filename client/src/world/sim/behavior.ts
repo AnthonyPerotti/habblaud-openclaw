@@ -113,11 +113,51 @@ export function idleSitMs(rng: () => number, liveliness: WorldOptions['livelines
   return a + rng() * (b - a);
 }
 
-/** Ocioso há mais que isso: cochila na mesa e para de passear. */
+/**
+ * Regras de sono no escritório:
+ * - 07:00 às 18:00: Ninguém dorme na mesa quando ocioso (horário de expediente).
+ * - 18:00 às 22:00: Podem começar a dormir (após LONG_IDLE_MS), mas podem acordar para interagir.
+ * - 22:00 às 07:00: Sono profundo; voltam a dormir após terminar o serviço (NIGHT_IDLE_MS) e só acordam com task.
+ */
+export const WAKE_HOUR = 7;
+export const SLEEP_START_HOUR = 18;
+export const DEEP_SLEEP_HOUR = 22;
+
+/** Ocioso há mais que isso no período noturno (18h-22h): cochila na mesa. */
 export const LONG_IDLE_MS = 10 * 60_000;
 
-export function isLongIdle(status: AgentStatus, statusSince: number, now: number): boolean {
-  return status === 'idle' && now - statusSince > LONG_IDLE_MS;
+/** De madrugada (22h-07h), após concluir o serviço e sentar na mesa, volta a dormir rapidamente. */
+export const NIGHT_IDLE_MS = 10_000;
+
+/** Retorna a hora fracionária do dia (0 a 24). */
+export function hourOfDay(now: number): number {
+  const d = new Date(now);
+  return d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
+}
+
+/** Horário comercial diurno: 07:00 às 18:00. Ninguém dorme na mesa. */
+export function isDaytime(hour: number): boolean {
+  return hour >= WAKE_HOUR && hour < SLEEP_START_HOUR;
+}
+
+/** Horário noturno inicial: 18:00 às 22:00. Podem começar a dormir, mas acordam para interagir. */
+export function isEvening(hour: number): boolean {
+  return hour >= SLEEP_START_HOUR && hour < DEEP_SLEEP_HOUR;
+}
+
+/** Horário de sono profundo: 22:00 às 07:00. Só acordam se tiver task e voltam a dormir ao terminar. */
+export function isDeepNight(hour: number): boolean {
+  return hour >= DEEP_SLEEP_HOUR || hour < WAKE_HOUR;
+}
+
+export function isLongIdle(status: AgentStatus, statusSince: number, now: number, hour?: number): boolean {
+  if (status !== 'idle') return false;
+  const h = hour !== undefined ? hour : hourOfDay(now);
+  if (isDaytime(h)) return false;
+  if (isDeepNight(h)) {
+    return now - statusSince >= NIGHT_IDLE_MS;
+  }
+  return now - statusSince > LONG_IDLE_MS;
 }
 
 /**

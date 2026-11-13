@@ -12,6 +12,7 @@ import { CAFE_ID, LOUNGE_ID, RECEPTION_ID, RESTROOM_ID } from '../layout/core';
 import type { SpotDef } from '../layout/types';
 import { FREE } from '../path/grid';
 import { facing, type Character } from '../sim/character';
+import { hourOfDay, isDeepNight } from '../sim/behavior';
 import type { Sim } from '../sim/sim';
 import type { Step } from '../sim/steps';
 import {
@@ -111,6 +112,8 @@ export class Social {
     if (!c.homeSpot || c.atSpot !== c.homeSpot) return false;
     if (now < c.reactUntil) return false;
     if (c.mode === 'shell' && (!c.shellSince || now - c.shellSince < SHELL_SOCIAL_MIN_MS)) return false;
+    // Das 22h às 07h: sono profundo. Só acordam se tiver alguma task (não participam de rodas sociais).
+    if (c.mode === 'idle' && isDeepNight(hourOfDay(now))) return false;
     return true;
   }
 

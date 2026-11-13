@@ -9,6 +9,7 @@ import {
   isLastInRoom,
   isLongIdle,
   LONG_IDLE_MS,
+  NIGHT_IDLE_MS,
   lightLevel,
   modeFor,
   pickIdleActivity,
@@ -57,11 +58,26 @@ describe('modos de comportamento', () => {
     expect(shouldRun(40, 'idle')).toBe(false);
   });
 
-  it('ocioso há mais de 10 min cochila', () => {
+  it('regras de sono: 07h-18h acordado, 18h-22h dorme apos 10 min, 22h-07h sono profundo (rapido apos task)', () => {
     const now = 1_000_000_000;
-    expect(isLongIdle('idle', now - LONG_IDLE_MS - 1, now)).toBe(true);
-    expect(isLongIdle('idle', now - 1000, now)).toBe(false);
-    expect(isLongIdle('working', now - LONG_IDLE_MS * 2, now)).toBe(false);
+    // 07h as 18h (dia): nunca dorme na mesa quando ocioso
+    expect(isLongIdle('idle', now - LONG_IDLE_MS * 5, now, 10)).toBe(false);
+    expect(isLongIdle('idle', now - LONG_IDLE_MS * 5, now, 14)).toBe(false);
+    expect(isLongIdle('idle', now - LONG_IDLE_MS * 5, now, 7.5)).toBe(false);
+
+    // 18h as 22h (noite inicial): dorme apos 10 min ocioso
+    expect(isLongIdle('idle', now - LONG_IDLE_MS - 1, now, 19)).toBe(true);
+    expect(isLongIdle('idle', now - 1000, now, 19)).toBe(false);
+    expect(isLongIdle('working', now - LONG_IDLE_MS * 2, now, 19)).toBe(false);
+
+    // 22h as 07h (madrugada/sono profundo): volta a dormir rapidamente apos terminar servico (NIGHT_IDLE_MS)
+    expect(isLongIdle('idle', now - NIGHT_IDLE_MS - 1, now, 23)).toBe(true);
+    expect(isLongIdle('idle', now - 1000, now, 23)).toBe(false);
+    expect(isLongIdle('idle', now - NIGHT_IDLE_MS - 1, now, 3)).toBe(true);
+    expect(isLongIdle('working', now - LONG_IDLE_MS * 2, now, 3)).toBe(false);
+
+    // As 07:00 da manha, voltam a acordar
+    expect(isLongIdle('idle', now - LONG_IDLE_MS * 5, now, 7)).toBe(false);
   });
 });
 
