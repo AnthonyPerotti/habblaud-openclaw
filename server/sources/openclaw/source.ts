@@ -33,31 +33,14 @@ interface DbHealth {
 }
 
 /**
- * Derives the workspace room directory for an OpenClaw session (Rule 1).
- * Resolution order:
- *   a) entry_json.sessionRoot, remapped from gateway view (/home/node/.openclaw)
- *      to container view (OPENCLAW_HOME or /openclaw)
- *   b) /openclaw/agents/<agentId>/ fallback
- *   c) /openclaw (or OPENCLAW_HOME) last resort
+ * Derives the room directory for an OpenClaw agent session.
+ * Each agent created in OpenClaw resides in <openclawHome>/agents/<agentId>,
+ * providing its own room in Habblaud.
  */
 export function resolveSessionCwd(openclawHome: string, s: OpenClawSession): string {
   const home = process.env.OPENCLAW_HOME || openclawHome || '/openclaw';
-  const remap = (p: string) => p.replace(/^.*?\/\.openclaw(?=\/|$)/, home);
-
-  // a) entry_json.sessionRoot, when present and non-empty
-  if (s.sessionRoot && s.sessionRoot.trim()) {
-    return remap(s.sessionRoot.trim());
-  }
-
-  // b) /openclaw/agents/<agentId>/ fallback
   const agentId = s.agentId || 'main';
-  const agentDir = join(home, 'agents', agentId);
-  if (existsSync(agentDir)) {
-    return agentDir;
-  }
-
-  // c) /openclaw (or OPENCLAW_HOME) as last resort
-  return home;
+  return join(home, 'agents', agentId);
 }
 
 export class OpenClawSource implements AgentSource {

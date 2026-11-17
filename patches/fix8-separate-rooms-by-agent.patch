@@ -30,78 +30,79 @@
 + *   2. agents.entries.<agentId>.name
 + *   3. Fallback: capitalized agentId (e.g. "Main", "Estagio") or raw agentId.
   */
--export function discoverOpenClawAccounts(openclawHome: string): ProviderAccountInput[] {
--  const accounts: ProviderAccountInput[] = [];
--  if (!existsSync(openclawHome)) {
--    // Return at least a default account entry so the UI has an OpenClaw account
--    accounts.push({
--      dir: openclawHome,
+-export function getAgentName(openclawHome: string, agentId: string): string {
 +export function getAgentName(openclawHome: string, agentId: string): string {
-+  const config = readOpenClawConfig(openclawHome) as any;
-+  const entry = config?.agents?.entries?.[agentId];
-+  const identityName = typeof entry?.identity?.name === 'string' ? entry.identity.name.trim() : undefined;
-+  if (identityName) return identityName;
-+
-+  const entryName = typeof entry?.name === 'string' ? entry.name.trim() : undefined;
-+  if (entryName) return entryName;
-+
-+  if (agentId === 'main') return 'Main';
-+  return agentId.charAt(0).toUpperCase() + agentId.slice(1);
-+}
-+
-+/**
-+ * Builds OpenClaw accounts dynamically for agent IDs with active sessions.
-+ * Follows strict rules:
-+ *   - Only creates accounts for agentIds with at least one live session.
-+ *   - configDir is always openclawHome (/openclaw).
-+ *   - id is openclaw:<agentId>.
-+ *   - Stable color assignment using ACCOUNT_COLORS over sorted agentIds.
-+ */
-+export function buildOpenClawAccounts(openclawHome: string, activeAgentIds: Iterable<string>): ProviderAccountInput[] {
-+  const sortedIds = Array.from(new Set(activeAgentIds)).filter(Boolean).sort();
-+  if (sortedIds.length === 0) return [];
-+
-+  const config = readOpenClawConfig(openclawHome);
-+  const primaryModel = config?.models?.primary || 'deepseek/deepseek-flash';
-+  const plan = primaryModel.replace(/^[a-z0-9_-]+\//i, '');
-+
-+  return sortedIds.map((agentId, i) => {
-+    const agentName = getAgentName(openclawHome, agentId);
-+    const letter = (agentName[0] || agentId[0] || 'O').toUpperCase();
-+    const color = ACCOUNT_COLORS[i % ACCOUNT_COLORS.length];
-+
-+    return {
-+      dir: join(openclawHome, 'agents', agentId),
+   const config = readOpenClawConfig(openclawHome) as any;
+   const entry = config?.agents?.entries?.[agentId];
+   const identityName = typeof entry?.identity?.name === 'string' ? entry.identity.name.trim() : undefined;
+   if (identityName) return identityName;
+ 
+   const entryName = typeof entry?.name === 'string' ? entry.name.trim() : undefined;
+   if (entryName) return entryName;
+ 
+   if (agentId === 'main') return 'Main';
+   return agentId.charAt(0).toUpperCase() + agentId.slice(1);
+ }
+ 
+ /**
+  * Builds OpenClaw accounts dynamically for agent IDs with active sessions.
+  * Follows strict rules:
+  *   - Only creates accounts for agentIds with at least one live session.
+  *   - configDir is always openclawHome (/openclaw).
+  *   - id is openclaw:<agentId>.
+  *   - Stable color assignment using ACCOUNT_COLORS over sorted agentIds.
+  */
+ export function buildOpenClawAccounts(openclawHome: string, activeAgentIds: Iterable<string>): ProviderAccountInput[] {
+   const sortedIds = Array.from(new Set(activeAgentIds)).filter(Boolean).sort();
+   if (sortedIds.length === 0) return [];
+ 
+   const config = readOpenClawConfig(openclawHome);
+   const primaryModel = config?.models?.primary || 'deepseek/deepseek-flash';
+   const plan = primaryModel.replace(/^[a-z0-9_-]+\//i, '');
+ 
+   return sortedIds.map((agentId, i) => {
+     const agentName = getAgentName(openclawHome, agentId);
+     const letter = (agentName[0] || agentId[0] || 'O').toUpperCase();
+     const color = ACCOUNT_COLORS[i % ACCOUNT_COLORS.length];
+ 
+     return {
+       dir: join(openclawHome, 'agents', agentId),
        detected: {
--        id: 'openclaw:main',
--        short: 'O',
--        name: 'OpenClaw',
--        color: '#ff6b4a',
-+        id: `openclaw:${agentId}`,
-+        short: letter,
-+        name: agentId === 'main' ? 'OpenClaw' : `OpenClaw (${agentName})`,
-+        color,
+         id: `openclaw:${agentId}`,
+         short: letter,
+         name: agentId === 'main' ? 'OpenClaw' : `OpenClaw (${agentName})`,
+         color,
          configDir: openclawHome,
--        plan: 'DeepSeek / Gemini',
-+        plan,
+         plan,
        },
--    });
--    return accounts;
-+    };
-+  });
-+}
-+
-+/**
-+ * Discovers OpenClaw agent accounts from the OpenClaw state directory.
-+ * Kept for initial setup before sessions are synced.
-+ */
-+export function discoverOpenClawAccounts(openclawHome: string): ProviderAccountInput[] {
-+  if (!existsSync(openclawHome)) {
-+    return buildOpenClawAccounts(openclawHome, ['main']);
+     };
+   });
+ }
+ 
+ /**
+  * Discovers OpenClaw agent accounts from the OpenClaw state directory.
+  * Kept for initial setup before sessions are synced.
+  */
+ export function discoverOpenClawAccounts(openclawHome: string): ProviderAccountInput[] {
+   if (!existsSync(openclawHome)) {
+     return buildOpenClawAccounts(openclawHome, ['main']);
    }
  
    const agentsDir = join(openclawHome, 'agents');
-@@ -62,27 +98,5 @@
+   const agentNames: string[] = [];
+ 
+   if (existsSync(agentsDir)) {
+     try {
+       const entries = readdirSync(agentsDir, { withFileTypes: true });
+       for (const e of entries) {
+         if (e.isDirectory()) agentNames.push(e.name);
+       }
+     } catch {
+       // ignore readdir failure
+     }
+   }
+ 
+   if (agentNames.length === 0) {
      agentNames.push('main');
    }
  
@@ -224,7 +225,7 @@
  import { OpenClawHistory } from './history';
  import { findOpenClawDatabases, readSessionsFromDb, readSessionsFromJson } from './sqlite';
  import { createOpenClawTerminalParser, syncOpenClawTranscript } from './terminal';
-@@ -29,6 +29,36 @@
+@@ -29,6 +29,19 @@
    ok: boolean;
    error?: string;
    lastReadAt: number;
@@ -232,35 +233,18 @@
 +}
 +
 +/**
-+ * Derives the workspace room directory for an OpenClaw session (Rule 1).
-+ * Resolution order:
-+ *   a) entry_json.sessionRoot, remapped from gateway view (/home/node/.openclaw)
-+ *      to container view (OPENCLAW_HOME or /openclaw)
-+ *   b) /openclaw/agents/<agentId>/ fallback
-+ *   c) /openclaw (or OPENCLAW_HOME) last resort
++ * Derives the room directory for an OpenClaw agent session.
++ * Each agent created in OpenClaw resides in <openclawHome>/agents/<agentId>,
++ * providing its own room in Habblaud.
 + */
 +export function resolveSessionCwd(openclawHome: string, s: OpenClawSession): string {
 +  const home = process.env.OPENCLAW_HOME || openclawHome || '/openclaw';
-+  const remap = (p: string) => p.replace(/^.*?\/\.openclaw(?=\/|$)/, home);
-+
-+  // a) entry_json.sessionRoot, when present and non-empty
-+  if (s.sessionRoot && s.sessionRoot.trim()) {
-+    return remap(s.sessionRoot.trim());
-+  }
-+
-+  // b) /openclaw/agents/<agentId>/ fallback
 +  const agentId = s.agentId || 'main';
-+  const agentDir = join(home, 'agents', agentId);
-+  if (existsSync(agentDir)) {
-+    return agentDir;
-+  }
-+
-+  // c) /openclaw (or OPENCLAW_HOME) as last resort
-+  return home;
++  return join(home, 'agents', agentId);
  }
  
  export class OpenClawSource implements AgentSource {
-@@ -53,10 +83,6 @@
+@@ -53,10 +66,6 @@
      if (this.running) return;
      this.running = true;
  
@@ -271,7 +255,7 @@
      this.opts.office.beginBoot();
      try {
        await this.syncSessions();
-@@ -103,7 +129,7 @@
+@@ -103,7 +112,7 @@
            label: 'openclaw',
            provider: 'openclaw',
            path: this.opts.openclawHome,
@@ -280,7 +264,7 @@
            ok: false,
            error: 'No databases found',
          },
-@@ -115,7 +141,7 @@
+@@ -115,7 +124,7 @@
          label: 'openclaw',
          provider: 'openclaw',
          path: dbPath,
@@ -289,7 +273,7 @@
          ok: h ? h.ok : true,
          ...(h?.error ? { error: h.error } : {}),
        } satisfies SourceInfo;
-@@ -176,11 +202,12 @@
+@@ -176,11 +185,12 @@
      const dbs = findOpenClawDatabases(this.opts.openclawHome);
      for (const dbPath of dbs) {
        const result = await readSessionsFromDb(dbPath);
@@ -304,7 +288,7 @@
        });
        raw.push(...result.sessions);
      }
-@@ -211,15 +238,24 @@
+@@ -211,15 +221,24 @@
        }
      }
  
@@ -332,12 +316,12 @@
  
      // Sort so parent sessions (spawnDepth 0 or lower) are processed before child subagents.
      // Parents must be in the Office before addSub() is called for their children.
-@@ -246,16 +282,21 @@
+@@ -246,16 +265,21 @@
          status = 'idle';
        }
  
 -      const cwd = join(this.opts.openclawHome, 'agents', s.agentId || 'main');
-+      // Rule 1: Room derived from the real session workspace (sessionRoot -> /openclaw/agents/<id> -> OPENCLAW_HOME)
++      // Room derived directly from agent directory (/openclaw/agents/<agentId>)
 +      const cwd = resolveSessionCwd(this.opts.openclawHome, s);
 +      const agentName = getAgentName(this.opts.openclawHome, s.agentId || 'main');
        const label = s.label?.trim();
@@ -363,7 +347,7 @@
        const existing = this.opts.office.detail(agentId)?.agent;
  
        // Check if existing agent transitioned its kind (main <-> sub)
-@@ -274,9 +315,12 @@
+@@ -274,9 +298,12 @@
            // (e.g., parallel sync where parent and child were read in the same batch but
            // parent's addMain is still pending), addSub returns false. We do NOT mark the
            // agent as active so the next poll cycle retries the insertion.
