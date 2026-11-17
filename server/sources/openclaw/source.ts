@@ -7,7 +7,7 @@ import { errMsg, log } from '../../log';
 import type { Office } from '../../model/office';
 import type { AgentSource } from '../source';
 import { createTerminalParser, type TerminalParser } from '../terminal';
-import { discoverOpenClawAccounts } from './accounts';
+import { buildOpenClawAccounts, discoverOpenClawAccounts, getAgentName } from './accounts';
 import { OpenClawHistory } from './history';
 import { findOpenClawDatabases, readSessionsFromDb, readSessionsFromJson } from './sqlite';
 import { createOpenClawTerminalParser, syncOpenClawTranscript } from './terminal';
@@ -29,6 +29,35 @@ interface DbHealth {
   ok: boolean;
   error?: string;
   lastReadAt: number;
+  sessions: number;
+}
+
+/**
+ * Derives the workspace room directory for an OpenClaw session (Rule 1).
+ * Resolution order:
+ *   a) entry_json.sessionRoot, remapped from gateway view (/home/node/.openclaw)
+ *      to container view (OPENCLAW_HOME or /openclaw)
+ *   b) /openclaw/agents/<agentId>/ fallback
+ *   c) /openclaw (or OPENCLAW_HOME) last resort
+ */
+export function resolveSessionCwd(openclawHome: string, s: OpenClawSession): string {
+  const home = process.env.OPENCLAW_HOME || openclawHome || '/openclaw';
+  const remap = (p: string) => p.replace(/^.*?\/\.openclaw(?=\/|$)/, home);
+
+  // a) entry_json.sessionRoot, when present and non-empty
+  if (s.sessionRoot && s.sessionRoot.trim()) {
+    return remap(s.sessionRoot.trim());
+  }
+
+  // b) /openclaw/agents/<agentId>/ fallback
+  const agentId = s.agentId || 'main';
+  const agentDir = join(home, 'agents', agentId);
+  if (existsSync(agentDir)) {
+    return agentDir;
+  }
+
+  // c) /openclaw (or OPENCLAW_HOME) as last resort
+  return home;
 }
 
 export class OpenClawSource implements AgentSource {
@@ -50,10 +79,6 @@ export class OpenClawSource implements AgentSource {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
-
-    // Register OpenClaw accounts
-    const discovered = discoverOpenClawAccounts(this.opts.openclawHome);
-    this.opts.accounts.setProviderAccounts('openclaw', discovered);
 
     this.opts.office.beginBoot();
     try {
@@ -103,7 +128,7 @@ export class OpenClawSource implements AgentSource {
           label: 'openclaw',
           provider: 'openclaw',
           path: this.opts.openclawHome,
-          sessions: this.activeAgentIds.size,
+          sessions: 0,
           ok: false,
           error: 'No databases found',
         },
@@ -115,7 +140,7 @@ export class OpenClawSource implements AgentSource {
         label: 'openclaw',
         provider: 'openclaw',
         path: dbPath,
-        sessions: this.activeAgentIds.size,
+        sessions: h ? h.sessions : 0,
         ok: h ? h.ok : true,
         ...(h?.error ? { error: h.error } : {}),
       } satisfies SourceInfo;
@@ -175,12 +200,13 @@ export class OpenClawSource implements AgentSource {
     const dbs = findOpenClawDatabases(this.opts.openclawHome);
     for (const dbPath of dbs) {
       const result = await readSessionsFromDb(dbPath);
-      // Update per-db health state (P1-1)
+      // Update per-db health state and per-source session count (Rule 4)
       this.dbHealth.set(dbPath, {
         path: dbPath,
         ok: result.ok,
         error: result.error,
         lastReadAt: Date.now(),
+        sessions: result.sessions.length,
       });
       raw.push(...result.sessions);
     }
@@ -209,15 +235,24 @@ export class OpenClawSource implements AgentSource {
       }
     }
 
-    // Deduplicate by sessionId across databases, keeping highest updatedAt (P1-4).
+    // Deduplicate by session key (or sessionId) across databases, keeping highest updatedAt (Rule 5 & P1-4).
     const deduped = new Map<string, OpenClawSession>();
     for (const s of raw) {
-      const existing = deduped.get(s.sessionId);
+      const dedupKey = s.key || s.sessionId;
+      const existing = deduped.get(dedupKey);
       if (!existing || (s.updatedAt ?? 0) > (existing.updatedAt ?? 0)) {
-        deduped.set(s.sessionId, s);
+        deduped.set(dedupKey, s);
       }
     }
     const sessions = Array.from(deduped.values());
+
+    // Register/update accounts only for agents with active sessions (Rule 3)
+    const liveAgentIds = new Set<string>();
+    for (const s of sessions) {
+      if (s.agentId) liveAgentIds.add(s.agentId);
+    }
+    const dynamicAccounts = buildOpenClawAccounts(this.opts.openclawHome, liveAgentIds);
+    this.opts.accounts.setProviderAccounts('openclaw', dynamicAccounts);
 
     // Sort so parent sessions (spawnDepth 0 or lower) are processed before child subagents.
     // Parents must be in the Office before addSub() is called for their children.
@@ -246,18 +281,24 @@ export class OpenClawSource implements AgentSource {
         status = 'idle';
       }
 
-      const cwd = join(this.opts.openclawHome, 'agents', s.agentId || 'main');
+      // Rule 1: Room derived from the real session workspace (sessionRoot -> /openclaw/agents/<id> -> OPENCLAW_HOME)
+      const cwd = resolveSessionCwd(this.opts.openclawHome, s);
+      const agentName = getAgentName(this.opts.openclawHome, s.agentId || 'main');
       const label = s.label?.trim();
-      const role = label ? `OpenClaw · ${label}` : s.model ? `OpenClaw · ${s.model}` : 'OpenClaw Agent';
       const keyParts = s.key.split(':');
       const channel = keyParts.length > 2 ? keyParts[2] : 'main';
 
-      // P1-3: treat session as sub when it has a parentSessionKey that differs from its
-      // own key — this is reliable even when spawnDepth is absent from the schema.
-      // spawnDepth > 0 is kept as a secondary signal (belt and suspenders).
+      // Rule 6: agent:<id>:main is always main of its own room.
+      // Sessions with parentSessionKey (different from own key) or explicit subagents are subs.
+      const isMainKey = /^agent:[^:]+:main$/.test(s.key);
       const hasParent = Boolean(s.parentSessionKey && s.parentSessionKey !== s.key);
-      const isSub = hasParent || Boolean(s.spawnDepth && s.spawnDepth > 0);
+      const isSub = !isMainKey && (hasParent || Boolean(s.spawnDepth && s.spawnDepth > 0));
       const targetKind = isSub ? 'sub' : 'main';
+
+      // Rule 2: role reflects agent name for main, and agent/label for subs
+      const role = isSub
+        ? (label ? `OpenClaw · ${label}` : `OpenClaw · ${agentName}`)
+        : (label ? `OpenClaw · ${label}` : `OpenClaw · ${agentName}`);
       const existing = this.opts.office.detail(agentId)?.agent;
 
       // Check if existing agent transitioned its kind (main <-> sub)
@@ -277,9 +318,12 @@ export class OpenClawSource implements AgentSource {
           // (e.g., parallel sync where parent and child were read in the same batch but
           // parent's addMain is still pending), addSub returns false. We do NOT mark the
           // agent as active so the next poll cycle retries the insertion.
+          const parentId = s.parentSessionKey
+            ? `openclaw:${s.parentSessionKey}`
+            : `openclaw:agent:${s.agentId || 'main'}:main`;
           const added = this.opts.office.addSub({
             id: agentId,
-            parentId: `openclaw:${s.parentSessionKey}`,
+            parentId,
             sessionId: s.sessionId,
             role,
             title: label || `Tarefa (${channel})`,

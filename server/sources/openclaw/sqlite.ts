@@ -226,6 +226,9 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
         const rows = db.prepare(`SELECT * FROM session_nodes ORDER BY ${orderBy}`).all() as Array<Record<string, unknown>>;
         const sessionMap = new Map<string, OpenClawSession>();
 
+        const dbAgentMatch = /[/\\]agents[/\\]([^/\\]+)[/\\]agent[/\\]/i.exec(dbPath);
+        const dbOwnerAgentId = dbAgentMatch ? dbAgentMatch[1] : undefined;
+
         for (const row of rows) {
           let payload: any = null;
           if (hasEntryJson && row.entry_json) {
@@ -250,6 +253,33 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
           );
           if (!sid || sessionMap.has(sid)) continue;
 
+          const key =
+            (typeof row.session_key === 'string' && row.session_key) ||
+            (typeof row.key === 'string' && row.key) ||
+            payload?.key ||
+            `session:${sid}`;
+
+          // Origin deduplication (Rule 5): if this database belongs to agent X, but the key
+          // explicitly belongs to agent Y (agent:Y:...), ignore this row here so it only
+          // comes from the owner agent's database.
+          const keyAgentMatch = /^agent:([^:]+):/.exec(key);
+          const keyAgentId = keyAgentMatch ? keyAgentMatch[1] : undefined;
+          if (dbOwnerAgentId && keyAgentId && keyAgentId !== dbOwnerAgentId) {
+            continue;
+          }
+
+          const resolvedAgentId =
+            keyAgentId ||
+            (typeof payload?.agentId === 'string' && payload.agentId.trim()) ||
+            (typeof row.agent_id === 'string' && row.agent_id.trim()) ||
+            dbOwnerAgentId ||
+            'main';
+
+          const sessionRoot =
+            (typeof payload?.sessionRoot === 'string' && payload.sessionRoot.trim()) ||
+            (typeof row.session_root === 'string' && row.session_root.trim()) ||
+            undefined;
+
           // Parent session key: new schema has a dedicated column (P0-1 / P1-3).
           const parentSessionKey =
             (typeof row.parent_session_key === 'string' && row.parent_session_key) ||
@@ -265,11 +295,6 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
               ? 1
               : 0;
 
-          const key =
-            (typeof row.session_key === 'string' && row.session_key) ||
-            (typeof row.key === 'string' && row.key) ||
-            payload?.key ||
-            `session:${sid}`;
           const model = (typeof row.model === 'string' && row.model) || payload?.model || payload?.modelProvider || undefined;
           const status = (typeof row.status === 'string' && row.status) || payload?.status || (payload?.error ? 'failed' : 'active');
           const startedAt = Number(payload?.sessionStartedAt || payload?.createdAt || row.created_at || Date.now());
@@ -290,7 +315,8 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
             totalTokens: payload?.totalTokens || payload?.tokens?.total,
             inputTokens: payload?.inputTokens || payload?.tokens?.input,
             outputTokens: payload?.outputTokens || payload?.tokens?.output,
-            agentId: payload?.agentId || String(row.agent_id || 'main'),
+            agentId: resolvedAgentId,
+            sessionRoot,
             label,
           });
         }
@@ -327,6 +353,21 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
           const sessionId = typeof row.sessionId === 'string' ? row.sessionId : typeof row.session_id === 'string' ? row.session_id : key;
           if (!key || !sessionId) continue;
 
+          const keyAgentMatch = /^agent:([^:]+):/.exec(key);
+          if (dbOwnerAgentId && keyAgentMatch && keyAgentMatch[1] !== dbOwnerAgentId) {
+            continue;
+          }
+          const resolvedAgentId =
+            (keyAgentMatch && keyAgentMatch[1]) ||
+            (typeof row.agentId === 'string' && row.agentId) ||
+            (typeof row.agent_id === 'string' && row.agent_id) ||
+            dbOwnerAgentId ||
+            'main';
+          const sessionRoot =
+            (typeof row.sessionRoot === 'string' && row.sessionRoot.trim()) ||
+            (typeof row.session_root === 'string' && row.session_root.trim()) ||
+            undefined;
+
           allSessions.push({
             key,
             sessionId,
@@ -342,7 +383,8 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
             inputTokens: typeof row.inputTokens === 'number' ? row.inputTokens : typeof row.input_tokens === 'number' ? row.input_tokens : undefined,
             outputTokens: typeof row.outputTokens === 'number' ? row.outputTokens : typeof row.output_tokens === 'number' ? row.output_tokens : undefined,
             contextTokens: typeof row.contextTokens === 'number' ? row.contextTokens : typeof row.context_tokens === 'number' ? row.context_tokens : undefined,
-            agentId: typeof row.agentId === 'string' ? row.agentId : typeof row.agent_id === 'string' ? row.agent_id : 'main',
+            agentId: resolvedAgentId,
+            sessionRoot,
             label: typeof row.label === 'string' ? row.label : typeof row.title === 'string' ? row.title : undefined,
           });
         }

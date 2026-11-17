@@ -34,6 +34,7 @@ export interface OpenClawSession {
   participantCount?: number;
   thinkingLevel?: string;
   abortedLastRun?: boolean;
+  sessionRoot?: string;
 }
 
 export interface OpenClawSessionsPayload {
