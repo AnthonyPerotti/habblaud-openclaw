@@ -114,6 +114,8 @@ export class OpenClawSource implements AgentSource {
   private activeAgentIds = new Set<string>();
   /** Health state per db path, exposed through sources() for /api/health (P1-1). */
   private dbHealth = new Map<string, DbHealth>();
+  /** Retains waiting state per session key until a new non-waiting tool runs or session finishes. */
+  private pendingWaiting = new Map<string, { toolName: string; input: unknown; reason: string; at: number }>();
 
   constructor(private readonly opts: OpenClawSourceOptions) {
     this.history = new OpenClawHistory(opts.openclawHome);
@@ -315,8 +317,28 @@ export class OpenClawSource implements AgentSource {
       const lastAt = s.lastInteractionAt || s.updatedAt || s.sessionStartedAt || now;
       const isRecent = now - lastAt < 180_000; // active in last 3 minutes
 
-      const isWaiting = s.status === 'waiting' || (isWaitingTool(s.lastToolName) && s.status !== 'failed');
-      const waitingReason = isWaiting ? extractWaitingReason(s.lastToolInput) : undefined;
+      // Manage persistent waiting state (AskUserQuestion, confirmation, permission)
+      if (s.status === 'done' || s.status === 'failed') {
+        this.pendingWaiting.delete(s.key);
+      } else if (s.lastToolName && !isWaitingTool(s.lastToolName)) {
+        this.pendingWaiting.delete(s.key);
+      } else if (isWaitingTool(s.lastToolName)) {
+        this.pendingWaiting.set(s.key, {
+          toolName: s.lastToolName!,
+          input: s.lastToolInput,
+          reason: extractWaitingReason(s.lastToolInput),
+          at: lastAt,
+        });
+      }
+
+      const pendingWait = this.pendingWaiting.get(s.key);
+      if (pendingWait && !s.lastToolName) {
+        s.lastToolName = pendingWait.toolName;
+        s.lastToolInput = pendingWait.input;
+      }
+
+      const isWaiting = s.status === 'waiting' || !!pendingWait || (isWaitingTool(s.lastToolName) && s.status !== 'failed');
+      const waitingReason = isWaiting ? (pendingWait?.reason ?? extractWaitingReason(s.lastToolInput)) : undefined;
 
       let status: AgentStatus = 'idle';
       if (isWaiting) {
@@ -455,6 +477,7 @@ export class OpenClawSource implements AgentSource {
         }
         this.activeAgentIds.delete(id);
         this.knownSessions.delete(rawKey);
+        this.pendingWaiting.delete(rawKey);
       }
     }
   }

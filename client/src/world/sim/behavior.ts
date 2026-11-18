@@ -135,6 +135,16 @@ export function hourOfDay(now: number): number {
   return d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
 }
 
+/**
+ * Retorna a hora efetiva levando em conta a preferência de luz do dia (DaylightMode).
+ * No modo 'day' fixa meio-dia (12h), no modo 'night' fixa meia-noite (0h), e no 'auto' segue o relógio local.
+ */
+export function effectiveHourFor(now: number, daylight?: DaylightMode): number {
+  if (daylight === 'day') return 12;
+  if (daylight === 'night') return 0;
+  return hourOfDay(now);
+}
+
 /** Horário comercial diurno: 07:00 às 18:00. Ninguém dorme na mesa. */
 export function isDaytime(hour: number): boolean {
   return hour >= WAKE_HOUR && hour < SLEEP_START_HOUR;
@@ -166,7 +176,7 @@ export function isLongIdle(
   if (daylight === 'night') return now - statusSince >= NIGHT_IDLE_MS;
 
   // "Automático": segue o ciclo do horário comercial e noturno.
-  const h = hour !== undefined ? hour : hourOfDay(now);
+  const h = hour !== undefined ? hour : effectiveHourFor(now, daylight);
   if (isDaytime(h)) return false;
   if (isDeepNight(h)) {
     return now - statusSince >= NIGHT_IDLE_MS;

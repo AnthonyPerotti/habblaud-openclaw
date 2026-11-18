@@ -60,7 +60,7 @@ export function buildOpenClawAccounts(openclawHome: string, activeAgentIds: Iter
 
   return sortedIds.map((agentId, i) => {
     const agentName = getAgentName(openclawHome, agentId);
-    const letter = (agentName[0] || agentId[0] || 'O').toUpperCase();
+    const letter = agentId === 'main' ? 'O' : (agentName[0] || agentId[0] || 'O').toUpperCase();
     const color = ACCOUNT_COLORS[i % ACCOUNT_COLORS.length];
 
     return {

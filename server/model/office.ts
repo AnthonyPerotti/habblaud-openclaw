@@ -999,9 +999,9 @@ export class Office {
     const perms = this.deps.permissions?.();
     const real = [...this.agents.values()].map((r) => applyPermission(cloneAgent(r.info), perms?.get(r.info.id)));
     const reach = this.deps.messages?.();
-    // Mensagens pelo escritório: principais presentes cuja sessão está com o plugin conectado. No demo quem decide é
+    // Mensagens pelo escritório: principais presentes cuja sessão está com o plugin conectado, ou agentes OpenClaw (principais e subagentes) quando o gateway está alcançável. No demo quem decide é
     // o simulador; com o recurso desligado, ninguém recebe.
-    for (const a of real) if (reach?.has(a.id) && a.kind === 'main' && a.status !== 'offline' && a.status !== 'done') a.canMessage = true;
+    for (const a of real) if (reach?.has(a.id) && (a.kind === 'main' || a.provider === 'openclaw') && a.status !== 'offline' && a.status !== 'done') a.canMessage = true;
     const demoAgents = (this.demoSnap?.agents ?? []).map((a) => {
       if (reach || !a.canMessage) return a;
       const { canMessage: _off, ...rest } = a;

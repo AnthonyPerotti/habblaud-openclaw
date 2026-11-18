@@ -19,6 +19,7 @@ import { browserStorage, type StorageLike } from '../social/wallet';
 import {
   canDismantle,
   chooseSeat,
+  effectiveHourFor,
   hourOfDay,
   idleSitMs,
   isDaytime,
@@ -160,6 +161,11 @@ export class Sim {
     this.finder = new PathFinder(this.building.grid);
     this.spots.setSpots(this.building.spots);
     for (const s of this.spots.ofKind('elevator')) this.elevators.push(new Elevator(this.elevators.length, s.id));
+  }
+
+  /** Exposes current WorldOptions to Social and other collaborators without making options fully public. */
+  currentOptions(): WorldOptions {
+    return this.options();
   }
 
   // =================================================================== snapshot
@@ -1215,7 +1221,8 @@ export class Sim {
     }
     if (ch.atSpot !== ch.homeSpot) return this.planGoHome(ch, now);
     ch.arriving = false;
-    const h = hourOfDay(now);
+    const daylight = daylightModeOf(this.options());
+    const h = effectiveHourFor(now, daylight);
     const sleeping = this.longIdle(ch, now);
     // De madrugada (22h-07h): sono profundo. Não acordam para passeios/social (só acordam se houver task).
     if (isDeepNight(h)) {
@@ -1587,7 +1594,9 @@ export class Sim {
         if (!s || !this.reserveTemp(ch, s)) return false;
         this.pushLeave(ch, steps);
         steps.push({ t: 'go', tx: s.tx, ty: s.ty }, { t: 'enter', spot: s.id });
-        if (!isDaytime(hourOfDay(now)) && rng() < (hasTrait(persona, 'sonecas') ? 0.7 : 0.25)) steps.push({ t: 'act', pose: 'sit', ms: between(rng, 3000, 6000) }, { t: 'act', pose: 'sleep', ms: between(rng, 8000, 16000), icon: 'zzz' });
+        const loungeDaylight = daylightModeOf(this.options());
+        const loungeH = effectiveHourFor(now, loungeDaylight);
+        if (!isDaytime(loungeH) && rng() < (hasTrait(persona, 'sonecas') ? 0.7 : 0.25)) steps.push({ t: 'act', pose: 'sit', ms: between(rng, 3000, 6000) }, { t: 'act', pose: 'sleep', ms: between(rng, 8000, 16000), icon: 'zzz' });
         else steps.push({ t: 'act', pose: 'sit', ms: between(rng, 9000, 22000), icon: rng() < 0.3 ? 'music' : undefined });
         steps.push({ t: 'exit' });
         release(s);

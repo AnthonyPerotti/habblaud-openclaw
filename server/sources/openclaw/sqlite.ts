@@ -212,6 +212,10 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
 
     const allSessions: OpenClawSession[] = [];
 
+    // Derive the owning agent ID from the database path (used by both Case 1 and Case 2 for deduplication).
+    const dbAgentMatchOuter = /[/\\]agents[/\\]([^/\\]+)[/\\]agent[/\\]/i.exec(dbPath);
+    const dbOwnerAgentId = dbAgentMatchOuter ? dbAgentMatchOuter[1] : undefined;
+
     // Case 1: OpenClaw schema with session_nodes
     if (tableNames.has('session_nodes')) {
       try {
@@ -225,9 +229,6 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
 
         const rows = db.prepare(`SELECT * FROM session_nodes ORDER BY ${orderBy}`).all() as Array<Record<string, unknown>>;
         const sessionMap = new Map<string, OpenClawSession>();
-
-        const dbAgentMatch = /[/\\]agents[/\\]([^/\\]+)[/\\]agent[/\\]/i.exec(dbPath);
-        const dbOwnerAgentId = dbAgentMatch ? dbAgentMatch[1] : undefined;
 
         for (const row of rows) {
           let payload: any = null;
@@ -325,11 +326,11 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
 
         // Fast transcript enrichment for speech bubbles.
         // Uses native SQLite rowid ordering (O(1) B-tree lookup, zero sorting, zero table scan).
-        // Reads at most 12 recent rows to avoid CPU spikes or blocking the event loop.
+        // Reads at most 50 recent rows to catch active tool calls across multiple concurrent sessions.
         try {
           if (tableNames.has('transcript_events')) {
             const recentRows = db
-              .prepare(`SELECT * FROM transcript_events ORDER BY rowid DESC LIMIT 12`)
+              .prepare(`SELECT * FROM transcript_events ORDER BY rowid DESC LIMIT 50`)
               .all() as Array<Record<string, unknown>>;
 
             const enriched = new Set<string>();
