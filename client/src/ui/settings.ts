@@ -4,7 +4,7 @@ import { access, remoteLogout } from '../net/access';
 import type { UiComponent, UiContext } from './context';
 import { h, iconButton, setAttr, setHidden, setText } from './dom';
 import { ICONS } from './icons';
-import { notificationState, type Notifier } from './notify';
+import { isSecureConnection, notificationState, type Notifier } from './notify';
 import type { UiPrefs } from './prefs';
 import { SoundSettingsGroup } from './settings-sound';
 import type { SoundControl } from './sound';
@@ -293,21 +293,28 @@ export class SettingsPopover implements UiComponent {
 
     const notif = this.switches.get('browserNotifications')!;
     const state = notificationState();
+    const insecure = !isSecureConnection();
     const hint =
-      state === 'unsupported'
+      insecure
+        ? tr('Navegador bloqueia notificações em conexões HTTP. Acesse via HTTPS ou por http://localhost:4747.')
+        : state === 'unsupported'
         ? tr('Este navegador não oferece notificações.')
         : state === 'denied'
-          ? tr('Bloqueadas pelo navegador: clique no cadeado na barra de endereço e libere as notificações do site.')
-          : state === 'default'
-          ? tr('Clique para autorizar notificações (avisa quando precisa de você e quando uma tarefa conclui).')
-          : tr('Notificações ativas: avisa quando alguém precisa de você e quando uma tarefa é concluída.');
+        ? tr('Bloqueadas pelo navegador: clique no cadeado na barra de endereço e libere as notificações do site.')
+        : state === 'default'
+        ? tr('Clique para autorizar notificações (avisa quando precisa de você e quando uma tarefa conclui).')
+        : tr('Notificações ativas: avisa quando alguém precisa de você e quando uma tarefa é concluída.');
     setText(notif.hint, hint);
     // Sync visual state with actual browser permission, not just the saved pref.
     setAttr(notif.btn, 'aria-checked', String(state === 'granted' && this.ctx.prefs.browserNotifications));
-    notif.btn.disabled = state === 'unsupported';
+    notif.btn.disabled = state === 'unsupported' || insecure;
   }
 
   private async toggleNotifications(): Promise<void> {
+    if (!isSecureConnection()) {
+      this.ctx.announce(tr('O navegador não permite notificações em conexões HTTP. Acesse via HTTPS ou por http://localhost:4747.'));
+      return;
+    }
     const current = notificationState();
     // When already denied by browser, remind the user where to unblock instead of trying again.
     if (current === 'denied') {

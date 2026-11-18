@@ -34,10 +34,25 @@ index e8b544d..9ec9695 100644
  }
  
 diff --git a/client/src/ui/notify.ts b/client/src/ui/notify.ts
-index b4da2d6..1320032 100644
+index b4da2d6..c1450f2 100644
 --- a/client/src/ui/notify.ts
 +++ b/client/src/ui/notify.ts
-@@ -52,9 +52,14 @@ export class Notifier implements UiComponent {
+@@ -11,8 +11,13 @@ const BASE_TITLE = 'Habblaud';
+ 
+ export type NotificationState = 'unsupported' | 'default' | 'granted' | 'denied';
+ 
++export function isSecureConnection(): boolean {
++  if (typeof window === 'undefined') return true;
++  return window.isSecureContext === true;
++}
++
+ export function notificationState(): NotificationState {
+-  if (typeof Notification === 'undefined') return 'unsupported';
++  if (typeof Notification === 'undefined' || !isSecureConnection()) return 'unsupported';
+   return Notification.permission;
+ }
+ 
+@@ -52,9 +57,14 @@ export class Notifier implements UiComponent {
      // o sino toca mesmo com a aba oculta (é ele que chama você de volta); o estalo, só com ela à vista
      if (n.level === 'alert') this.sounds.play('chime');
      else if (n.level === 'success') this.sounds.play('pop');
@@ -55,27 +70,49 @@ index b4da2d6..1320032 100644
            tag: n.agentId ?? n.id,
            icon: '/assets/brand/favicon-32.png',
 diff --git a/client/src/ui/settings.ts b/client/src/ui/settings.ts
-index b1b998d..abf4a02 100644
+index b1b998d..665378c 100644
 --- a/client/src/ui/settings.ts
 +++ b/client/src/ui/settings.ts
-@@ -297,20 +297,32 @@ export class SettingsPopover implements UiComponent {
-       state === 'unsupported'
+@@ -4,7 +4,7 @@ import { access, remoteLogout } from '../net/access';
+ import type { UiComponent, UiContext } from './context';
+ import { h, iconButton, setAttr, setHidden, setText } from './dom';
+ import { ICONS } from './icons';
+-import { notificationState, type Notifier } from './notify';
++import { isSecureConnection, notificationState, type Notifier } from './notify';
+ import type { UiPrefs } from './prefs';
+ import { SoundSettingsGroup } from './settings-sound';
+ import type { SoundControl } from './sound';
+@@ -293,24 +293,43 @@ export class SettingsPopover implements UiComponent {
+ 
+     const notif = this.switches.get('browserNotifications')!;
+     const state = notificationState();
++    const insecure = !isSecureConnection();
+     const hint =
+-      state === 'unsupported'
++      insecure
++        ? tr('Navegador bloqueia notificações em conexões HTTP. Acesse via HTTPS ou por http://localhost:4747.')
++        : state === 'unsupported'
          ? tr('Este navegador não oferece notificações.')
          : state === 'denied'
 -          ? tr('Bloqueadas pelo navegador: libere nas permissões do site.')
 -          : tr('Avisa quando alguém precisa de você e a aba está em segundo plano.');
-+          ? tr('Bloqueadas pelo navegador: clique no cadeado na barra de endereço e libere as notificações do site.')
-+          : state === 'default'
-+          ? tr('Clique para autorizar notificações (avisa quando precisa de você e quando uma tarefa conclui).')
-+          : tr('Notificações ativas: avisa quando alguém precisa de você e quando uma tarefa é concluída.');
++        ? tr('Bloqueadas pelo navegador: clique no cadeado na barra de endereço e libere as notificações do site.')
++        : state === 'default'
++        ? tr('Clique para autorizar notificações (avisa quando precisa de você e quando uma tarefa conclui).')
++        : tr('Notificações ativas: avisa quando alguém precisa de você e quando uma tarefa é concluída.');
      setText(notif.hint, hint);
+-    notif.btn.disabled = state === 'unsupported';
 +    // Sync visual state with actual browser permission, not just the saved pref.
 +    setAttr(notif.btn, 'aria-checked', String(state === 'granted' && this.ctx.prefs.browserNotifications));
-     notif.btn.disabled = state === 'unsupported';
++    notif.btn.disabled = state === 'unsupported' || insecure;
    }
  
    private async toggleNotifications(): Promise<void> {
 -    if (this.ctx.prefs.browserNotifications) {
++    if (!isSecureConnection()) {
++      this.ctx.announce(tr('O navegador não permite notificações em conexões HTTP. Acesse via HTTPS ou por http://localhost:4747.'));
++      return;
++    }
 +    const current = notificationState();
 +    // When already denied by browser, remind the user where to unblock instead of trying again.
 +    if (current === 'denied') {
@@ -108,6 +145,157 @@ index 6bef670..e6f5958 100644
      openclawGatewayToken: env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined,
      dataDir: resolve(env.HABBLAUD_DATA_DIR?.trim() || (inDocker ? '/data' : join(home, '.habblaud'))),
      usageDir: resolve(env.HABBLAUD_USAGE_DIR?.trim() || join(home, '.habblaud', 'usage')),
+diff --git a/server/messages/openclaw.ts b/server/messages/openclaw.ts
+index 25b95f6..434f7e1 100644
+--- a/server/messages/openclaw.ts
++++ b/server/messages/openclaw.ts
+@@ -53,6 +53,22 @@ export function resolveOpenClawToken(env: NodeJS.ProcessEnv = process.env, openc
+   }
+ 
+   if (openclawHome) {
++    const configPath = join(openclawHome, 'openclaw.json');
++    if (existsSync(configPath)) {
++      try {
++        const raw = readFileSync(configPath, 'utf8');
++        const parsed = JSON.parse(raw);
++        const t =
++          parsed?.gateway?.auth?.token ||
++          parsed?.gateway?.token ||
++          parsed?.auth?.token ||
++          parsed?.token;
++        if (typeof t === 'string' && t.trim()) return t.trim();
++      } catch {
++        // ignore read error
++      }
++    }
++
+     const candidates = [
+       join(openclawHome, 'gateway.token'),
+       join(openclawHome, '.gateway-token'),
+@@ -87,38 +103,32 @@ function sanitizeError(err: unknown, token?: string): string {
+ 
+ export class OpenClawGatewayClient {
+   readonly gatewayUrl: string;
++  activeGatewayUrl: string;
+   private readonly token?: string;
+   private readonly timeoutMs: number;
+   private readonly _fetch: typeof fetch;
+   private reachable = false;
+   private lastCheckAt = 0;
++  private checking = false;
+ 
+   constructor(opts: OpenClawDeliveryClientOptions) {
+     this.gatewayUrl = opts.gatewayUrl.replace(/\/+$/, '');
++    this.activeGatewayUrl = this.gatewayUrl;
+     this.token = opts.token;
+     this.timeoutMs = opts.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
+     this._fetch = opts.fetchFn ?? globalThis.fetch;
+   }
+ 
+   /**
+-   * Checks if the OpenClaw Gateway is configured and reachable.
+-   * Caches reachability for up to 10 seconds to avoid ping spamming.
++   * Probes a single gateway URL for reachability.
+    */
+-  async checkReachable(force = false): Promise<boolean> {
+-    const now = Date.now();
+-    if (!force && now - this.lastCheckAt < 10_000) {
+-      return this.reachable;
+-    }
+-    this.lastCheckAt = now;
+-
++  private async probeUrl(url: string): Promise<boolean> {
+     try {
+-      const httpUrl = this.gatewayUrl.replace(/^ws(s?):\/\//, 'http$1://');
++      const httpUrl = url.replace(/^ws(s?):\/\//, 'http$1://');
+       const headers: Record<string, string> = {};
+       if (this.token) {
+         headers.Authorization = `Bearer ${this.token}`;
+       }
+-
+-      // Check /api/health or /v1/models or root /
+       const res = await this._fetch(`${httpUrl}/v1/models`, {
+         method: 'GET',
+         headers,
+@@ -137,16 +147,65 @@ export class OpenClawGatewayClient {
+         });
+       });
+ 
+-      // Status < 500 or 401/403 proves the gateway server is up and reachable
+-      this.reachable = res.status < 500 || res.status === 401 || res.status === 403;
+-      return this.reachable;
++      return res.status < 500 || res.status === 401 || res.status === 403;
+     } catch {
++      return false;
++    }
++  }
++
++  /**
++   * Checks if the OpenClaw Gateway is reachable.
++   * If the primary URL fails, probes standard local/docker gateway host addresses.
++   * Caches reachability for up to 10 seconds.
++   */
++  async checkReachable(force = false): Promise<boolean> {
++    const now = Date.now();
++    if (!force && now - this.lastCheckAt < 10_000) {
++      return this.reachable;
++    }
++    if (this.checking) return this.reachable;
++    this.checking = true;
++    this.lastCheckAt = now;
++
++    try {
++      // 1. Try currently active URL first
++      if (await this.probeUrl(this.activeGatewayUrl)) {
++        this.reachable = true;
++        return true;
++      }
++
++      // 2. Candidate fallbacks (docker bridge host, docker internal, localhost)
++      const candidates = [
++        this.gatewayUrl,
++        'http://172.17.0.1:18789',
++        'http://host.docker.internal:18789',
++        'http://127.0.0.1:18789',
++        'http://openclaw:18789',
++      ].filter((u) => u !== this.activeGatewayUrl);
++
++      for (const candidate of candidates) {
++        if (await this.probeUrl(candidate)) {
++          this.activeGatewayUrl = candidate;
++          this.reachable = true;
++          return true;
++        }
++      }
++
+       this.reachable = false;
+       return false;
++    } finally {
++      this.checking = false;
+     }
+   }
+ 
+   isAvailable(): boolean {
++    const now = Date.now();
++    // Auto-recheck in background when unreachable or every 30s
++    if (!this.reachable && now - this.lastCheckAt >= 5_000) {
++      this.checkReachable().catch(() => {});
++    } else if (now - this.lastCheckAt >= 30_000) {
++      this.checkReachable().catch(() => {});
++    }
+     return this.reachable;
+   }
+ 
+@@ -164,7 +223,8 @@ export class OpenClawGatewayClient {
+       return { ok: false, error: tr('chave de sessão do OpenClaw inválida') };
+     }
+ 
+-    const httpUrl = this.gatewayUrl.replace(/^ws(s?):\/\//, 'http$1://');
++    const targetUrl = this.activeGatewayUrl || this.gatewayUrl;
++    const httpUrl = targetUrl.replace(/^ws(s?):\/\//, 'http$1://');
+ 
+     // 1. If WebSocket is available and gatewayUrl is a ws:// or requested, try WS
+     if (this.gatewayUrl.startsWith('ws://') || this.gatewayUrl.startsWith('wss://')) {
 diff --git a/server/messages/registry.ts b/server/messages/registry.ts
 index 2d1f30d..bd4b043 100644
 --- a/server/messages/registry.ts
@@ -142,7 +330,7 @@ index 2d1f30d..bd4b043 100644
      if (at === undefined || this.now() - at >= this.presenceMs) return false;
      return present(a) && a.kind === 'main';
 diff --git a/server/sources/openclaw/source.ts b/server/sources/openclaw/source.ts
-index dcadf4b..f409cee 100644
+index dcadf4b..a055579 100644
 --- a/server/sources/openclaw/source.ts
 +++ b/server/sources/openclaw/source.ts
 @@ -7,6 +7,7 @@ import { errMsg, log } from '../../log';
@@ -153,7 +341,28 @@ index dcadf4b..f409cee 100644
  import { buildOpenClawAccounts, discoverOpenClawAccounts, getAgentName } from './accounts';
  import { OpenClawHistory } from './history';
  import { findOpenClawDatabases, readSessionsFromDb, readSessionsFromJson } from './sqlite';
-@@ -333,15 +334,35 @@ export class OpenClawSource implements AgentSource {
+@@ -37,6 +38,20 @@ interface DbHealth {
+  * Each agent created in OpenClaw resides in <openclawHome>/agents/<agentId>,
+  * providing its own room in Habblaud.
+  */
++function normalizeOpenClawTool(raw: string): string {
++  const lower = raw.toLowerCase().replace(/[-_]/g, '');
++  if (lower === 'bash' || lower === 'sh' || lower === 'shell' || lower === 'terminal' || lower === 'execute' || lower === 'cmd' || lower === 'exec' || lower === 'command') return 'Bash';
++  if (lower === 'read' || lower === 'readfile' || lower === 'view' || lower === 'viewfile' || lower === 'cat') return 'Read';
++  if (lower === 'edit' || lower === 'editfile' || lower === 'strreplaceeditor' || lower === 'multiedit') return 'Edit';
++  if (lower === 'write' || lower === 'writefile' || lower === 'writetofile' || lower === 'createfile') return 'Write';
++  if (lower === 'ls' || lower === 'listdir' || lower === 'listfiles' || lower === 'dir') return 'LS';
++  if (lower === 'grep' || lower === 'searchcode' || lower === 'searchfiles') return 'Grep';
++  if (lower === 'glob' || lower === 'findfiles' || lower === 'findbyname') return 'Glob';
++  if (lower === 'websearch' || lower === 'google' || lower === 'googlesearch' || lower === 'search') return 'WebSearch';
++  if (lower === 'webfetch' || lower === 'fetch' || lower === 'curl' || lower === 'http') return 'WebFetch';
++  return raw;
++}
++
+ export function resolveSessionCwd(openclawHome: string, s: OpenClawSession): string {
+   const home = process.env.OPENCLAW_HOME || openclawHome || '/openclaw';
+   const agentId = s.agentId || 'main';
+@@ -333,15 +348,36 @@ export class OpenClawSource implements AgentSource {
          this.opts.office.setStatus(agentId, status);
        }
  
@@ -169,9 +378,10 @@ index dcadf4b..f409cee 100644
 +      // Build activity: use last tool call when available, otherwise fall back to status text.
 +      let act: Activity;
 +      if (status === 'working' && s.lastToolName) {
-+        const desc = describeTool(s.lastToolName, s.lastToolInput);
++        const normName = normalizeOpenClawTool(s.lastToolName);
++        const desc = describeTool(normName, s.lastToolInput);
 +        act = {
-+          id: `act:${s.key}:${lastAt}`,
++          id: `act:${s.key}:${desc.text}:${lastAt}`,
 +          kind: desc.kind,
 +          icon: desc.icon,
 +          text: desc.text,
@@ -179,7 +389,7 @@ index dcadf4b..f409cee 100644
 +        };
 +      } else if (status === 'working' && s.lastActivityText) {
 +        act = {
-+          id: `act:${s.key}:${lastAt}`,
++          id: `act:${s.key}:${s.lastActivityText.slice(0, 30)}:${lastAt}`,
 +          kind: 'think',
 +          icon: '🧠',
 +          text: s.lastActivityText.slice(0, 60),
@@ -188,7 +398,7 @@ index dcadf4b..f409cee 100644
 +      } else {
 +        const activityText = s.model ? `Modelo: ${s.model}` : `Canal: ${channel}`;
 +        act = {
-+          id: `act:${s.key}:${lastAt}`,
++          id: `act:${s.key}:${status}:${lastAt}`,
 +          kind: status === 'working' ? 'think' : 'done',
 +          icon: status === 'working' ? '🧠' : '☕',
 +          text: status === 'working' ? `Processando (${activityText})` : `Aguardando (${activityText})`,
@@ -199,7 +409,7 @@ index dcadf4b..f409cee 100644
      }
  
 diff --git a/server/sources/openclaw/sqlite.ts b/server/sources/openclaw/sqlite.ts
-index 8310bb8..7889697 100644
+index 8310bb8..ad229d8 100644
 --- a/server/sources/openclaw/sqlite.ts
 +++ b/server/sources/openclaw/sqlite.ts
 @@ -322,6 +322,70 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
@@ -207,68 +417,68 @@ index 8310bb8..7889697 100644
  
          allSessions.push(...sessionMap.values());
 +
-+        // Enrich sessions with the last tool call from transcript for speech bubbles.
-+        // Best-effort: any error here never breaks session sync.
++        // Fast transcript enrichment for speech bubbles.
++        // Uses native SQLite rowid ordering (O(1) B-tree lookup, zero sorting, zero table scan).
++        // Reads at most 12 recent rows to avoid CPU spikes or blocking the event loop.
 +        try {
-+          const transcriptTable = tableNames.has('transcript_events') ? 'transcript_events'
-+            : tableNames.has('transcript_nodes') ? 'transcript_nodes'
-+            : null;
-+          if (transcriptTable) {
-+            const tCols = db.prepare(`PRAGMA table_info(${transcriptTable})`).all() as Array<{ name: string }>;
-+            const tColSet = new Set(tCols.map((c) => c.name));
-+            const payloadCol = tColSet.has('event_json') ? 'event_json'
-+              : tColSet.has('payload') ? 'payload'
-+              : tColSet.has('data') ? 'data'
-+              : null;
-+            const keyCol = tColSet.has('session_key') ? 'session_key'
-+              : tColSet.has('session_id') ? 'session_id'
-+              : null;
-+            if (payloadCol && keyCol) {
-+              const orderCol = tColSet.has('created_at') ? 'created_at'
-+                : tColSet.has('id') ? 'id'
-+                : 'rowid';
-+              const recentRows = db
-+                .prepare(`SELECT ${keyCol}, ${payloadCol} FROM ${transcriptTable} ORDER BY ${orderCol} DESC LIMIT 500`)
-+                .all() as Array<Record<string, unknown>>;
-+              const enriched = new Set<string>();
-+              for (const row of recentRows) {
-+                const sk = String(row[keyCol] ?? '');
-+                if (!sk || enriched.has(sk)) continue;
-+                const rawPayload = decompressPayload(row[payloadCol]);
-+                if (!rawPayload) continue;
-+                let ev: any;
-+                try { ev = JSON.parse(rawPayload); } catch { continue; }
-+                const inner = ev?.event ?? ev?.content ?? ev;
-+                if (!inner) continue;
-+                const toolName: string | undefined =
-+                  inner.type === 'tool_use' ? inner.name :
-+                  ev.type === 'tool_use' ? ev.name :
-+                  inner.tool?.name ?? inner.toolName ?? undefined;
-+                const toolInput: unknown =
-+                  inner.type === 'tool_use' ? inner.input :
-+                  ev.type === 'tool_use' ? ev.input :
-+                  inner.tool?.input ?? inner.toolInput ?? undefined;
-+                const activityText: string | undefined =
-+                  typeof inner.text === 'string' && inner.text.trim()
-+                    ? inner.text.trim().slice(0, 80)
-+                    : typeof ev.text === 'string' && ev.text.trim()
-+                    ? ev.text.trim().slice(0, 80)
-+                    : undefined;
-+                if (!toolName && !activityText) continue;
-+                const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
-+                if (!session) continue;
-+                enriched.add(sk);
-+                if (toolName) {
-+                  session.lastToolName = toolName;
-+                  session.lastToolInput = toolInput;
-+                } else if (activityText) {
-+                  session.lastActivityText = activityText;
-+                }
++          if (tableNames.has('transcript_events')) {
++            const recentRows = db
++              .prepare(`SELECT * FROM transcript_events ORDER BY rowid DESC LIMIT 12`)
++              .all() as Array<Record<string, unknown>>;
++
++            const enriched = new Set<string>();
++            for (const row of recentRows) {
++              const sk = String(row.session_key || row.session_id || '');
++              if (!sk || enriched.has(sk)) continue;
++
++              const rawData = row.entry_json || row.payload || row.data || row.event_json || row.content;
++              const rawPayload = decompressPayload(rawData);
++              if (!rawPayload) continue;
++
++              let ev: any;
++              try { ev = JSON.parse(rawPayload); } catch { continue; }
++
++              const inner = ev?.event ?? ev?.content ?? ev?.message ?? ev;
++              if (!inner) continue;
++
++              let toolName: string | undefined =
++                inner.type === 'tool_use' || inner.type === 'toolCall' ? inner.name
++                : ev.type === 'tool_use' || ev.type === 'toolCall' ? ev.name
++                : inner.tool?.name ?? inner.toolName ?? undefined;
++
++              let toolInput: unknown =
++                inner.type === 'tool_use' || inner.type === 'toolCall' ? (inner.input ?? inner.arguments)
++                : ev.type === 'tool_use' || ev.type === 'toolCall' ? (ev.input ?? ev.arguments)
++                : inner.tool?.input ?? inner.toolInput ?? undefined;
++
++              if (!toolName && Array.isArray(inner.tool_calls) && inner.tool_calls[0]) {
++                toolName = inner.tool_calls[0].name || inner.tool_calls[0].function?.name;
++                toolInput = inner.tool_calls[0].input || inner.tool_calls[0].function?.arguments;
++              }
++
++              const activityText: string | undefined =
++                typeof inner.text === 'string' && inner.text.trim()
++                  ? inner.text.trim().slice(0, 80)
++                  : typeof ev.text === 'string' && ev.text.trim()
++                  ? ev.text.trim().slice(0, 80)
++                  : undefined;
++
++              if (!toolName && !activityText) continue;
++
++              const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
++              if (!session) continue;
++
++              enriched.add(sk);
++              if (toolName) {
++                session.lastToolName = toolName;
++                session.lastToolInput = toolInput;
++              } else if (activityText) {
++                session.lastActivityText = activityText;
 +              }
 +            }
 +          }
 +        } catch {
-+          // Non-critical enrichment: ignore all errors.
++          // Non-critical enrichment: never abort session sync
 +        }
        } catch (branchErr) {
          // A failure reading session_nodes does not abort the sessions table branch below (P1-1).

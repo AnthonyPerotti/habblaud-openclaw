@@ -38,6 +38,20 @@ interface DbHealth {
  * Each agent created in OpenClaw resides in <openclawHome>/agents/<agentId>,
  * providing its own room in Habblaud.
  */
+function normalizeOpenClawTool(raw: string): string {
+  const lower = raw.toLowerCase().replace(/[-_]/g, '');
+  if (lower === 'bash' || lower === 'sh' || lower === 'shell' || lower === 'terminal' || lower === 'execute' || lower === 'cmd' || lower === 'exec' || lower === 'command') return 'Bash';
+  if (lower === 'read' || lower === 'readfile' || lower === 'view' || lower === 'viewfile' || lower === 'cat') return 'Read';
+  if (lower === 'edit' || lower === 'editfile' || lower === 'strreplaceeditor' || lower === 'multiedit') return 'Edit';
+  if (lower === 'write' || lower === 'writefile' || lower === 'writetofile' || lower === 'createfile') return 'Write';
+  if (lower === 'ls' || lower === 'listdir' || lower === 'listfiles' || lower === 'dir') return 'LS';
+  if (lower === 'grep' || lower === 'searchcode' || lower === 'searchfiles') return 'Grep';
+  if (lower === 'glob' || lower === 'findfiles' || lower === 'findbyname') return 'Glob';
+  if (lower === 'websearch' || lower === 'google' || lower === 'googlesearch' || lower === 'search') return 'WebSearch';
+  if (lower === 'webfetch' || lower === 'fetch' || lower === 'curl' || lower === 'http') return 'WebFetch';
+  return raw;
+}
+
 export function resolveSessionCwd(openclawHome: string, s: OpenClawSession): string {
   const home = process.env.OPENCLAW_HOME || openclawHome || '/openclaw';
   const agentId = s.agentId || 'main';
@@ -337,9 +351,10 @@ export class OpenClawSource implements AgentSource {
       // Build activity: use last tool call when available, otherwise fall back to status text.
       let act: Activity;
       if (status === 'working' && s.lastToolName) {
-        const desc = describeTool(s.lastToolName, s.lastToolInput);
+        const normName = normalizeOpenClawTool(s.lastToolName);
+        const desc = describeTool(normName, s.lastToolInput);
         act = {
-          id: `act:${s.key}:${lastAt}`,
+          id: `act:${s.key}:${desc.text}:${lastAt}`,
           kind: desc.kind,
           icon: desc.icon,
           text: desc.text,
@@ -347,7 +362,7 @@ export class OpenClawSource implements AgentSource {
         };
       } else if (status === 'working' && s.lastActivityText) {
         act = {
-          id: `act:${s.key}:${lastAt}`,
+          id: `act:${s.key}:${s.lastActivityText.slice(0, 30)}:${lastAt}`,
           kind: 'think',
           icon: '🧠',
           text: s.lastActivityText.slice(0, 60),
@@ -356,7 +371,7 @@ export class OpenClawSource implements AgentSource {
       } else {
         const activityText = s.model ? `Modelo: ${s.model}` : `Canal: ${channel}`;
         act = {
-          id: `act:${s.key}:${lastAt}`,
+          id: `act:${s.key}:${status}:${lastAt}`,
           kind: status === 'working' ? 'think' : 'done',
           icon: status === 'working' ? '🧠' : '☕',
           text: status === 'working' ? `Processando (${activityText})` : `Aguardando (${activityText})`,

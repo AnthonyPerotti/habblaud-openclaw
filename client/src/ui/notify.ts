@@ -11,8 +11,13 @@ const BASE_TITLE = 'Habblaud';
 
 export type NotificationState = 'unsupported' | 'default' | 'granted' | 'denied';
 
+export function isSecureConnection(): boolean {
+  if (typeof window === 'undefined') return true;
+  return window.isSecureContext === true;
+}
+
 export function notificationState(): NotificationState {
-  if (typeof Notification === 'undefined') return 'unsupported';
+  if (typeof Notification === 'undefined' || !isSecureConnection()) return 'unsupported';
   return Notification.permission;
 }
 

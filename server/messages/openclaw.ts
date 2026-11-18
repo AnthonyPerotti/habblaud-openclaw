@@ -53,6 +53,22 @@ export function resolveOpenClawToken(env: NodeJS.ProcessEnv = process.env, openc
   }
 
   if (openclawHome) {
+    const configPath = join(openclawHome, 'openclaw.json');
+    if (existsSync(configPath)) {
+      try {
+        const raw = readFileSync(configPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        const t =
+          parsed?.gateway?.auth?.token ||
+          parsed?.gateway?.token ||
+          parsed?.auth?.token ||
+          parsed?.token;
+        if (typeof t === 'string' && t.trim()) return t.trim();
+      } catch {
+        // ignore read error
+      }
+    }
+
     const candidates = [
       join(openclawHome, 'gateway.token'),
       join(openclawHome, '.gateway-token'),
@@ -87,38 +103,32 @@ function sanitizeError(err: unknown, token?: string): string {
 
 export class OpenClawGatewayClient {
   readonly gatewayUrl: string;
+  activeGatewayUrl: string;
   private readonly token?: string;
   private readonly timeoutMs: number;
   private readonly _fetch: typeof fetch;
   private reachable = false;
   private lastCheckAt = 0;
+  private checking = false;
 
   constructor(opts: OpenClawDeliveryClientOptions) {
     this.gatewayUrl = opts.gatewayUrl.replace(/\/+$/, '');
+    this.activeGatewayUrl = this.gatewayUrl;
     this.token = opts.token;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
     this._fetch = opts.fetchFn ?? globalThis.fetch;
   }
 
   /**
-   * Checks if the OpenClaw Gateway is configured and reachable.
-   * Caches reachability for up to 10 seconds to avoid ping spamming.
+   * Probes a single gateway URL for reachability.
    */
-  async checkReachable(force = false): Promise<boolean> {
-    const now = Date.now();
-    if (!force && now - this.lastCheckAt < 10_000) {
-      return this.reachable;
-    }
-    this.lastCheckAt = now;
-
+  private async probeUrl(url: string): Promise<boolean> {
     try {
-      const httpUrl = this.gatewayUrl.replace(/^ws(s?):\/\//, 'http$1://');
+      const httpUrl = url.replace(/^ws(s?):\/\//, 'http$1://');
       const headers: Record<string, string> = {};
       if (this.token) {
         headers.Authorization = `Bearer ${this.token}`;
       }
-
-      // Check /api/health or /v1/models or root /
       const res = await this._fetch(`${httpUrl}/v1/models`, {
         method: 'GET',
         headers,
@@ -137,16 +147,65 @@ export class OpenClawGatewayClient {
         });
       });
 
-      // Status < 500 or 401/403 proves the gateway server is up and reachable
-      this.reachable = res.status < 500 || res.status === 401 || res.status === 403;
-      return this.reachable;
+      return res.status < 500 || res.status === 401 || res.status === 403;
     } catch {
-      this.reachable = false;
       return false;
     }
   }
 
+  /**
+   * Checks if the OpenClaw Gateway is reachable.
+   * If the primary URL fails, probes standard local/docker gateway host addresses.
+   * Caches reachability for up to 10 seconds.
+   */
+  async checkReachable(force = false): Promise<boolean> {
+    const now = Date.now();
+    if (!force && now - this.lastCheckAt < 10_000) {
+      return this.reachable;
+    }
+    if (this.checking) return this.reachable;
+    this.checking = true;
+    this.lastCheckAt = now;
+
+    try {
+      // 1. Try currently active URL first
+      if (await this.probeUrl(this.activeGatewayUrl)) {
+        this.reachable = true;
+        return true;
+      }
+
+      // 2. Candidate fallbacks (docker bridge host, docker internal, localhost)
+      const candidates = [
+        this.gatewayUrl,
+        'http://172.17.0.1:18789',
+        'http://host.docker.internal:18789',
+        'http://127.0.0.1:18789',
+        'http://openclaw:18789',
+      ].filter((u) => u !== this.activeGatewayUrl);
+
+      for (const candidate of candidates) {
+        if (await this.probeUrl(candidate)) {
+          this.activeGatewayUrl = candidate;
+          this.reachable = true;
+          return true;
+        }
+      }
+
+      this.reachable = false;
+      return false;
+    } finally {
+      this.checking = false;
+    }
+  }
+
   isAvailable(): boolean {
+    const now = Date.now();
+    // Auto-recheck in background when unreachable or every 30s
+    if (!this.reachable && now - this.lastCheckAt >= 5_000) {
+      this.checkReachable().catch(() => {});
+    } else if (now - this.lastCheckAt >= 30_000) {
+      this.checkReachable().catch(() => {});
+    }
     return this.reachable;
   }
 
@@ -164,7 +223,8 @@ export class OpenClawGatewayClient {
       return { ok: false, error: tr('chave de sessão do OpenClaw inválida') };
     }
 
-    const httpUrl = this.gatewayUrl.replace(/^ws(s?):\/\//, 'http$1://');
+    const targetUrl = this.activeGatewayUrl || this.gatewayUrl;
+    const httpUrl = targetUrl.replace(/^ws(s?):\/\//, 'http$1://');
 
     // 1. If WebSocket is available and gatewayUrl is a ws:// or requested, try WS
     if (this.gatewayUrl.startsWith('ws://') || this.gatewayUrl.startsWith('wss://')) {
