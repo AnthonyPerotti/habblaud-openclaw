@@ -132,6 +132,97 @@ index b1b998d..665378c 100644
    }
  
    private async toggleDemo(): Promise<void> {
+diff --git a/client/src/world/sim/behavior.ts b/client/src/world/sim/behavior.ts
+index 7ea6475..5438126 100644
+--- a/client/src/world/sim/behavior.ts
++++ b/client/src/world/sim/behavior.ts
+@@ -1,7 +1,7 @@
+ // Decisões de comportamento — funções PURAS (testáveis sem DOM).
+ import type { ActivityKind, AgentKind, AgentStatus, ShellJob } from '../../../../shared/types';
+ import type { ScreenMode } from '../../art/api';
+-import type { WorldOptions } from '../api';
++import type { DaylightMode, WorldOptions } from '../api';
+ import type { SpotDef } from '../layout/types';
+ import { foregroundWaiting } from './shell';
+ 
+@@ -150,8 +150,22 @@ export function isDeepNight(hour: number): boolean {
+   return hour >= DEEP_SLEEP_HOUR || hour < WAKE_HOUR;
+ }
+ 
+-export function isLongIdle(status: AgentStatus, statusSince: number, now: number, hour?: number): boolean {
++export function isLongIdle(
++  status: AgentStatus,
++  statusSince: number,
++  now: number,
++  hour?: number,
++  daylight?: DaylightMode,
++): boolean {
+   if (status !== 'idle') return false;
++
++  // "Sempre dia": nunca entram no estado dormindo na frente do PC.
++  if (daylight === 'day') return false;
++
++  // "Sempre noite": sempre dormem quando ociosos, acordando apenas para fazer task do usuário.
++  if (daylight === 'night') return now - statusSince >= NIGHT_IDLE_MS;
++
++  // "Automático": segue o ciclo do horário comercial e noturno.
+   const h = hour !== undefined ? hour : hourOfDay(now);
+   if (isDaytime(h)) return false;
+   if (isDeepNight(h)) {
+diff --git a/client/src/world/sim/sim-pure.test.ts b/client/src/world/sim/sim-pure.test.ts
+index 959320c..8308fef 100644
+--- a/client/src/world/sim/sim-pure.test.ts
++++ b/client/src/world/sim/sim-pure.test.ts
+@@ -78,6 +78,18 @@ describe('modos de comportamento', () => {
+ 
+     // As 07:00 da manha, voltam a acordar
+     expect(isLongIdle('idle', now - LONG_IDLE_MS * 5, now, 7)).toBe(false);
++
++    // Preferência de Daylight:
++    // 'day': nunca dorme na mesa (mesmo de noite/madrugada)
++    expect(isLongIdle('idle', now - NIGHT_IDLE_MS - 1, now, 23, 'day')).toBe(false);
++    expect(isLongIdle('idle', now - LONG_IDLE_MS * 10, now, 2, 'day')).toBe(false);
++
++    // 'night': sempre dorme quando ocioso (apos NIGHT_IDLE_MS), mesmo de dia
++    expect(isLongIdle('idle', now - NIGHT_IDLE_MS - 1, now, 12, 'night')).toBe(true);
++    expect(isLongIdle('idle', now - 1000, now, 12, 'night')).toBe(false);
++    // Mas se estiver trabalhando ou esperando, NUNCA dorme
++    expect(isLongIdle('working', now - NIGHT_IDLE_MS * 5, now, 12, 'night')).toBe(false);
++    expect(isLongIdle('waiting', now - NIGHT_IDLE_MS * 5, now, 12, 'night')).toBe(false);
+   });
+ });
+ 
+diff --git a/client/src/world/sim/sim.ts b/client/src/world/sim/sim.ts
+index bff1681..71ca701 100644
+--- a/client/src/world/sim/sim.ts
++++ b/client/src/world/sim/sim.ts
+@@ -40,6 +40,7 @@ import { countShells, latestShellDone, shellLabel, shellStage, shellWaitSince, s
+ import { SpotRegistry } from './spots';
+ import type { Step } from './steps';
+ import { EXIT_RADIUS, NO_INTENT, stepFree, tileAt, VISITOR_LANYARD, type VisitorIntent } from './visitor';
++import { daylightModeOf } from '../render/daylight';
+ import { tr } from '../../../../shared/i18n';
+ 
+ /**
+@@ -464,7 +465,7 @@ export class Sim {
+       !!home &&
+       roomsSeated.has(ch.roomId) &&
+       now - ch.info.statusSince >= INITIAL_LOUNGE_MIN_IDLE_MS &&
+-      !isLongIdle(ch.info.status, ch.info.statusSince, now) &&
++      !this.longIdle(ch, now) &&
+       ch.rng() < INITIAL_LOUNGE_SHARE;
+     if (relaxing) {
+       const seat = this.randomFree(INITIAL_LOUNGE_SEATS, ch);
+@@ -1744,7 +1745,8 @@ export class Sim {
+ 
+   /** Ocioso há muito tempo (cochila na mesa, nem sempre aceita convite)? Na visita, nunca: o tempo não veio do mundo. */
+   longIdle(ch: Character, now: number): boolean {
+-    return !this.visit && isLongIdle(ch.info.status, ch.info.statusSince, now);
++    const daylight = daylightModeOf(this.options());
++    return !this.visit && isLongIdle(ch.info.status, ch.info.statusSince, now, undefined, daylight);
+   }
+ 
+   /** Os personagens desenhados: os agentes e, na visita, o visitante (por último). */
 diff --git a/server/config.ts b/server/config.ts
 index 6bef670..e6f5958 100644
 --- a/server/config.ts
@@ -330,7 +421,7 @@ index 2d1f30d..bd4b043 100644
      if (at === undefined || this.now() - at >= this.presenceMs) return false;
      return present(a) && a.kind === 'main';
 diff --git a/server/sources/openclaw/source.ts b/server/sources/openclaw/source.ts
-index dcadf4b..a055579 100644
+index dcadf4b..bccf0af 100644
 --- a/server/sources/openclaw/source.ts
 +++ b/server/sources/openclaw/source.ts
 @@ -7,6 +7,7 @@ import { errMsg, log } from '../../log';
@@ -341,7 +432,7 @@ index dcadf4b..a055579 100644
  import { buildOpenClawAccounts, discoverOpenClawAccounts, getAgentName } from './accounts';
  import { OpenClawHistory } from './history';
  import { findOpenClawDatabases, readSessionsFromDb, readSessionsFromJson } from './sqlite';
-@@ -37,6 +38,20 @@ interface DbHealth {
+@@ -37,6 +38,65 @@ interface DbHealth {
   * Each agent created in OpenClaw resides in <openclawHome>/agents/<agentId>,
   * providing its own room in Habblaud.
   */
@@ -356,14 +447,92 @@ index dcadf4b..a055579 100644
 +  if (lower === 'glob' || lower === 'findfiles' || lower === 'findbyname') return 'Glob';
 +  if (lower === 'websearch' || lower === 'google' || lower === 'googlesearch' || lower === 'search') return 'WebSearch';
 +  if (lower === 'webfetch' || lower === 'fetch' || lower === 'curl' || lower === 'http') return 'WebFetch';
++  if (
++    lower === 'askuser' ||
++    lower === 'askuserquestion' ||
++    lower === 'ask' ||
++    lower === 'question' ||
++    lower === 'userquestion' ||
++    lower === 'requestpermission' ||
++    lower === 'permission' ||
++    lower === 'confirm' ||
++    lower === 'approval' ||
++    lower === 'confirmaction'
++  ) return 'AskUserQuestion';
 +  return raw;
++}
++
++function isWaitingTool(toolName?: string): boolean {
++  if (!toolName) return false;
++  const lower = toolName.toLowerCase().replace(/[-_]/g, '');
++  return (
++    lower === 'askuser' ||
++    lower === 'askuserquestion' ||
++    lower === 'ask' ||
++    lower === 'question' ||
++    lower === 'userquestion' ||
++    lower === 'requestpermission' ||
++    lower === 'permission' ||
++    lower === 'confirm' ||
++    lower === 'approval' ||
++    lower === 'confirmaction'
++  );
++}
++
++function extractWaitingReason(toolInput: unknown): string {
++  if (!toolInput) return tr('responder pergunta');
++  if (typeof toolInput === 'string') return toolInput.slice(0, 80);
++  if (typeof toolInput === 'object') {
++    const obj = toolInput as Record<string, unknown>;
++    const q = obj.question || obj.prompt || obj.message || obj.text;
++    if (typeof q === 'string' && q.trim()) return q.trim().slice(0, 80);
++    if (Array.isArray(obj.questions) && obj.questions[0]) {
++      const first = obj.questions[0];
++      const qFirst = typeof first === 'string' ? first : (first as any)?.question || (first as any)?.prompt;
++      if (typeof qFirst === 'string' && qFirst.trim()) return qFirst.trim().slice(0, 80);
++    }
++  }
++  return tr('responder pergunta');
 +}
 +
  export function resolveSessionCwd(openclawHome: string, s: OpenClawSession): string {
    const home = process.env.OPENCLAW_HOME || openclawHome || '/openclaw';
    const agentId = s.agentId || 'main';
-@@ -333,15 +348,36 @@ export class OpenClawSource implements AgentSource {
-         this.opts.office.setStatus(agentId, status);
+@@ -255,8 +315,11 @@ export class OpenClawSource implements AgentSource {
+       const lastAt = s.lastInteractionAt || s.updatedAt || s.sessionStartedAt || now;
+       const isRecent = now - lastAt < 180_000; // active in last 3 minutes
+ 
++      const isWaiting = s.status === 'waiting' || (isWaitingTool(s.lastToolName) && s.status !== 'failed');
++      const waitingReason = isWaiting ? extractWaitingReason(s.lastToolInput) : undefined;
++
+       let status: AgentStatus = 'idle';
+-      if (s.status === 'waiting') {
++      if (isWaiting) {
+         status = 'waiting';
+       } else if (s.status === 'active' || s.status === 'running' || s.status === 'in_progress' || (isRecent && s.status !== 'done' && s.status !== 'failed')) {
+         status = 'working';
+@@ -315,6 +378,9 @@ export class OpenClawSource implements AgentSource {
+           });
+           if (!added) continue; // retry on next sync when parent is present
+           this.activeAgentIds.add(agentId);
++          if (status !== 'working') {
++            this.opts.office.setStatus(agentId, status, waitingReason);
++          }
+         } else {
+           this.opts.office.addMain({
+             id: agentId,
+@@ -325,23 +391,55 @@ export class OpenClawSource implements AgentSource {
+             role,
+             startedAt: s.sessionStartedAt || now,
+             status,
++            waitingFor: waitingReason,
+           });
+           this.activeAgentIds.add(agentId);
+         }
+       } else {
+         // Existing agent, update status
+-        this.opts.office.setStatus(agentId, status);
++        this.opts.office.setStatus(agentId, status, waitingReason);
        }
  
 -      // Synthesize activity
@@ -377,7 +546,17 @@ index dcadf4b..a055579 100644
 -      };
 +      // Build activity: use last tool call when available, otherwise fall back to status text.
 +      let act: Activity;
-+      if (status === 'working' && s.lastToolName) {
++      if (status === 'waiting') {
++        const normName = normalizeOpenClawTool(s.lastToolName || 'AskUserQuestion');
++        const desc = describeTool(normName, s.lastToolInput);
++        act = {
++          id: `act:${s.key}:wait:${waitingReason}:${lastAt}`,
++          kind: 'ask',
++          icon: desc.icon || '❓',
++          text: waitingReason ?? tr('responder pergunta'),
++          at: lastAt,
++        };
++      } else if (status === 'working' && s.lastToolName) {
 +        const normName = normalizeOpenClawTool(s.lastToolName);
 +        const desc = describeTool(normName, s.lastToolInput);
 +        act = {

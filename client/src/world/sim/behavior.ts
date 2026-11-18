@@ -1,7 +1,7 @@
 // Decisões de comportamento — funções PURAS (testáveis sem DOM).
 import type { ActivityKind, AgentKind, AgentStatus, ShellJob } from '../../../../shared/types';
 import type { ScreenMode } from '../../art/api';
-import type { WorldOptions } from '../api';
+import type { DaylightMode, WorldOptions } from '../api';
 import type { SpotDef } from '../layout/types';
 import { foregroundWaiting } from './shell';
 
@@ -150,8 +150,22 @@ export function isDeepNight(hour: number): boolean {
   return hour >= DEEP_SLEEP_HOUR || hour < WAKE_HOUR;
 }
 
-export function isLongIdle(status: AgentStatus, statusSince: number, now: number, hour?: number): boolean {
+export function isLongIdle(
+  status: AgentStatus,
+  statusSince: number,
+  now: number,
+  hour?: number,
+  daylight?: DaylightMode,
+): boolean {
   if (status !== 'idle') return false;
+
+  // "Sempre dia": nunca entram no estado dormindo na frente do PC.
+  if (daylight === 'day') return false;
+
+  // "Sempre noite": sempre dormem quando ociosos, acordando apenas para fazer task do usuário.
+  if (daylight === 'night') return now - statusSince >= NIGHT_IDLE_MS;
+
+  // "Automático": segue o ciclo do horário comercial e noturno.
   const h = hour !== undefined ? hour : hourOfDay(now);
   if (isDaytime(h)) return false;
   if (isDeepNight(h)) {

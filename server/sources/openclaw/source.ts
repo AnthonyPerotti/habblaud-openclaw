@@ -49,7 +49,52 @@ function normalizeOpenClawTool(raw: string): string {
   if (lower === 'glob' || lower === 'findfiles' || lower === 'findbyname') return 'Glob';
   if (lower === 'websearch' || lower === 'google' || lower === 'googlesearch' || lower === 'search') return 'WebSearch';
   if (lower === 'webfetch' || lower === 'fetch' || lower === 'curl' || lower === 'http') return 'WebFetch';
+  if (
+    lower === 'askuser' ||
+    lower === 'askuserquestion' ||
+    lower === 'ask' ||
+    lower === 'question' ||
+    lower === 'userquestion' ||
+    lower === 'requestpermission' ||
+    lower === 'permission' ||
+    lower === 'confirm' ||
+    lower === 'approval' ||
+    lower === 'confirmaction'
+  ) return 'AskUserQuestion';
   return raw;
+}
+
+function isWaitingTool(toolName?: string): boolean {
+  if (!toolName) return false;
+  const lower = toolName.toLowerCase().replace(/[-_]/g, '');
+  return (
+    lower === 'askuser' ||
+    lower === 'askuserquestion' ||
+    lower === 'ask' ||
+    lower === 'question' ||
+    lower === 'userquestion' ||
+    lower === 'requestpermission' ||
+    lower === 'permission' ||
+    lower === 'confirm' ||
+    lower === 'approval' ||
+    lower === 'confirmaction'
+  );
+}
+
+function extractWaitingReason(toolInput: unknown): string {
+  if (!toolInput) return tr('responder pergunta');
+  if (typeof toolInput === 'string') return toolInput.slice(0, 80);
+  if (typeof toolInput === 'object') {
+    const obj = toolInput as Record<string, unknown>;
+    const q = obj.question || obj.prompt || obj.message || obj.text;
+    if (typeof q === 'string' && q.trim()) return q.trim().slice(0, 80);
+    if (Array.isArray(obj.questions) && obj.questions[0]) {
+      const first = obj.questions[0];
+      const qFirst = typeof first === 'string' ? first : (first as any)?.question || (first as any)?.prompt;
+      if (typeof qFirst === 'string' && qFirst.trim()) return qFirst.trim().slice(0, 80);
+    }
+  }
+  return tr('responder pergunta');
 }
 
 export function resolveSessionCwd(openclawHome: string, s: OpenClawSession): string {
@@ -270,8 +315,11 @@ export class OpenClawSource implements AgentSource {
       const lastAt = s.lastInteractionAt || s.updatedAt || s.sessionStartedAt || now;
       const isRecent = now - lastAt < 180_000; // active in last 3 minutes
 
+      const isWaiting = s.status === 'waiting' || (isWaitingTool(s.lastToolName) && s.status !== 'failed');
+      const waitingReason = isWaiting ? extractWaitingReason(s.lastToolInput) : undefined;
+
       let status: AgentStatus = 'idle';
-      if (s.status === 'waiting') {
+      if (isWaiting) {
         status = 'waiting';
       } else if (s.status === 'active' || s.status === 'running' || s.status === 'in_progress' || (isRecent && s.status !== 'done' && s.status !== 'failed')) {
         status = 'working';
@@ -330,6 +378,9 @@ export class OpenClawSource implements AgentSource {
           });
           if (!added) continue; // retry on next sync when parent is present
           this.activeAgentIds.add(agentId);
+          if (status !== 'working') {
+            this.opts.office.setStatus(agentId, status, waitingReason);
+          }
         } else {
           this.opts.office.addMain({
             id: agentId,
@@ -340,17 +391,28 @@ export class OpenClawSource implements AgentSource {
             role,
             startedAt: s.sessionStartedAt || now,
             status,
+            waitingFor: waitingReason,
           });
           this.activeAgentIds.add(agentId);
         }
       } else {
         // Existing agent, update status
-        this.opts.office.setStatus(agentId, status);
+        this.opts.office.setStatus(agentId, status, waitingReason);
       }
 
       // Build activity: use last tool call when available, otherwise fall back to status text.
       let act: Activity;
-      if (status === 'working' && s.lastToolName) {
+      if (status === 'waiting') {
+        const normName = normalizeOpenClawTool(s.lastToolName || 'AskUserQuestion');
+        const desc = describeTool(normName, s.lastToolInput);
+        act = {
+          id: `act:${s.key}:wait:${waitingReason}:${lastAt}`,
+          kind: 'ask',
+          icon: desc.icon || '❓',
+          text: waitingReason ?? tr('responder pergunta'),
+          at: lastAt,
+        };
+      } else if (status === 'working' && s.lastToolName) {
         const normName = normalizeOpenClawTool(s.lastToolName);
         const desc = describeTool(normName, s.lastToolInput);
         act = {

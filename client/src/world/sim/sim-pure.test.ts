@@ -78,6 +78,18 @@ describe('modos de comportamento', () => {
 
     // As 07:00 da manha, voltam a acordar
     expect(isLongIdle('idle', now - LONG_IDLE_MS * 5, now, 7)).toBe(false);
+
+    // Preferência de Daylight:
+    // 'day': nunca dorme na mesa (mesmo de noite/madrugada)
+    expect(isLongIdle('idle', now - NIGHT_IDLE_MS - 1, now, 23, 'day')).toBe(false);
+    expect(isLongIdle('idle', now - LONG_IDLE_MS * 10, now, 2, 'day')).toBe(false);
+
+    // 'night': sempre dorme quando ocioso (apos NIGHT_IDLE_MS), mesmo de dia
+    expect(isLongIdle('idle', now - NIGHT_IDLE_MS - 1, now, 12, 'night')).toBe(true);
+    expect(isLongIdle('idle', now - 1000, now, 12, 'night')).toBe(false);
+    // Mas se estiver trabalhando ou esperando, NUNCA dorme
+    expect(isLongIdle('working', now - NIGHT_IDLE_MS * 5, now, 12, 'night')).toBe(false);
+    expect(isLongIdle('waiting', now - NIGHT_IDLE_MS * 5, now, 12, 'night')).toBe(false);
   });
 });
 

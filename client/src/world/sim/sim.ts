@@ -40,6 +40,7 @@ import { countShells, latestShellDone, shellLabel, shellStage, shellWaitSince, s
 import { SpotRegistry } from './spots';
 import type { Step } from './steps';
 import { EXIT_RADIUS, NO_INTENT, stepFree, tileAt, VISITOR_LANYARD, type VisitorIntent } from './visitor';
+import { daylightModeOf } from '../render/daylight';
 import { tr } from '../../../../shared/i18n';
 
 /**
@@ -464,7 +465,7 @@ export class Sim {
       !!home &&
       roomsSeated.has(ch.roomId) &&
       now - ch.info.statusSince >= INITIAL_LOUNGE_MIN_IDLE_MS &&
-      !isLongIdle(ch.info.status, ch.info.statusSince, now) &&
+      !this.longIdle(ch, now) &&
       ch.rng() < INITIAL_LOUNGE_SHARE;
     if (relaxing) {
       const seat = this.randomFree(INITIAL_LOUNGE_SEATS, ch);
@@ -1744,7 +1745,8 @@ export class Sim {
 
   /** Ocioso há muito tempo (cochila na mesa, nem sempre aceita convite)? Na visita, nunca: o tempo não veio do mundo. */
   longIdle(ch: Character, now: number): boolean {
-    return !this.visit && isLongIdle(ch.info.status, ch.info.statusSince, now);
+    const daylight = daylightModeOf(this.options());
+    return !this.visit && isLongIdle(ch.info.status, ch.info.statusSince, now, undefined, daylight);
   }
 
   /** Os personagens desenhados: os agentes e, na visita, o visitante (por último). */
