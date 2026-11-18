@@ -10,8 +10,8 @@
 // Authentication token and TLS certificates are resolved from environment variables or local files,
 // never exposed to the client or leaked in logs or error messages.
 import { existsSync, readFileSync } from 'node:fs';
-import http from 'node:http';
-import https from 'node:https';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { join } from 'node:path';
 import { URL } from 'node:url';
 import { tr } from '../../shared/i18n';
@@ -19,6 +19,17 @@ import { tr } from '../../shared/i18n';
 export const DEFAULT_DELIVERY_TIMEOUT_MS = 15_000;
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2_500;
 
+/** TLS errors that mean untrusted certificate, not a down server. */
+const CERTIFICATE_ERROR_CODES = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_HAS_EXPIRED',
+]);
+
+/** Transient network errors: DNS warming up, recycled socket, dropped connection. */
 export const RETRYABLE_NETWORK_CODES = new Set([
   'ENOTFOUND',
   'EAI_AGAIN',
@@ -30,26 +41,6 @@ export const RETRYABLE_NETWORK_CODES = new Set([
   'UND_ERR_SOCKET',
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
-
-/**
- * Executes an asynchronous function with exponential retries on transient network errors.
- */
-async function withRetry<T>(fn: () => Promise<T>, retries = 2, delays = [250, 750]): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await fn();
-    } catch (err: any) {
-      const code = String(err?.code || err?.cause?.code || '');
-      if (attempt < retries && (RETRYABLE_NETWORK_CODES.has(code) || err?.name === 'FetchError')) {
-        await new Promise((r) => setTimeout(r, delays[attempt] || 500));
-        attempt++;
-        continue;
-      }
-      throw err;
-    }
-  }
-}
 
 /**
  * Resolves the default gateway IP inside a Linux/Docker container via /proc/net/route.
@@ -88,154 +79,107 @@ export type OpenClawDeliveryResult = { ok: true } | { ok: false; error: string }
 export type OpenClawDeliveryRunner = (job: OpenClawDeliveryJob) => Promise<OpenClawDeliveryResult>;
 
 export interface OpenClawTlsOptions {
-  ca?: string;
-  insecure?: boolean;
+  ca?: Buffer;
+  insecure: boolean;
+  /** CA auto-detected in the OpenClaw directory: allows falling back to insecure after a cert error. */
+  allowInsecureFallback?: boolean;
 }
 
 export interface OpenClawDeliveryClientOptions {
   gatewayUrl: string;
   token?: string;
-  ca?: string;
-  insecure?: boolean;
-  model?: string;
   timeoutMs?: number;
   fetchFn?: typeof fetch;
-}
-
-export interface HttpResponse {
-  status: number;
-  statusText: string;
-  ok: boolean;
-  headers: Record<string, string>;
-  text: () => Promise<string>;
-}
-
-export interface HttpRequestOptions {
-  method?: string;
-  headers?: Record<string, string>;
-  body?: string;
-  timeoutMs?: number;
-  ca?: string;
+  /** Defaults to being derived from sessionKey ("agent:main:x" -> "openclaw/main"). */
+  model?: string;
+  ca?: string | Buffer;
   insecure?: boolean;
-}
-
-/**
- * Native Node.js HTTP/HTTPS transport that accepts custom CA certificates and insecure flags
- * without requiring undici or global process-level modifications.
- */
-export function httpRequest(targetUrl: string, opts: HttpRequestOptions = {}): Promise<HttpResponse> {
-  return new Promise((resolve, reject) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(targetUrl);
-    } catch (err) {
-      return reject(err);
-    }
-
-    const isHttps = parsed.protocol === 'https:';
-    const transport = isHttps ? https : http;
-
-    const reqOptions: https.RequestOptions = {
-      protocol: parsed.protocol,
-      hostname: parsed.hostname,
-      port: parsed.port || (isHttps ? 443 : 80),
-      path: parsed.pathname + parsed.search,
-      method: opts.method || 'GET',
-      headers: opts.headers || {},
-      timeout: opts.timeoutMs || DEFAULT_DELIVERY_TIMEOUT_MS,
-    };
-
-    if (isHttps) {
-      if (opts.ca) {
-        reqOptions.ca = opts.ca;
-      }
-      if (opts.insecure !== undefined) {
-        reqOptions.rejectUnauthorized = !opts.insecure;
-      }
-    }
-
-    const req = transport.request(reqOptions, (res) => {
-      const status = res.statusCode || 0;
-      const statusText = res.statusMessage || '';
-      const ok = status >= 200 && status < 300;
-      const headers: Record<string, string> = {};
-      for (const [k, v] of Object.entries(res.headers)) {
-        if (typeof v === 'string') headers[k.toLowerCase()] = v;
-        else if (Array.isArray(v)) headers[k.toLowerCase()] = v.join(', ');
-      }
-
-      let bodyData = '';
-      let resolved = false;
-
-      // With stream: true, receiving 200 OK headers and initial data confirms prompt delivery
-      res.on('data', (chunk) => {
-        bodyData += chunk;
-        if (!resolved && ok) {
-          resolved = true;
-          resolve({
-            status,
-            statusText,
-            ok,
-            headers,
-            text: async () => bodyData,
-          });
-        }
-      });
-
-      res.on('end', () => {
-        if (!resolved) {
-          resolved = true;
-          resolve({
-            status,
-            statusText,
-            ok,
-            headers,
-            text: async () => bodyData,
-          });
-        }
-      });
-    });
-
-    req.on('timeout', () => {
-      req.destroy(new Error('ETIMEDOUT'));
-    });
-
-    req.on('error', (err) => {
-      reject(err);
-    });
-
-    if (opts.body) {
-      req.write(opts.body);
-    }
-    req.end();
-  });
+  allowInsecureFallback?: boolean;
+  /** Delay between retries in ms. Empty array disables retry. */
+  retryDelaysMs?: number[];
 }
 
 /**
  * Resolves TLS options for OpenClaw Gateway connections.
  * Automatically detects OpenClaw auto-generated CA certificates in <openclawHome>/gateway/tls/gateway-cert.pem.
- * If a certificate exists without SAN, defaults to insecure mode to allow local connection out-of-the-box.
+ * Returns allowInsecureFallback=true for auto-detected certs (which lack SAN) so the client can
+ * fall through to insecure mode on first certificate validation error without manual configuration.
  */
-export function resolveOpenClawTls(env: NodeJS.ProcessEnv = process.env, openclawHome?: string): OpenClawTlsOptions {
+export function resolveOpenClawTls(
+  env: NodeJS.ProcessEnv = process.env,
+  openclawHome?: string,
+): OpenClawTlsOptions {
   const insecure = /^(1|true|yes)$/i.test((env.OPENCLAW_GATEWAY_TLS_INSECURE ?? '').trim());
+  const explicit = env.OPENCLAW_GATEWAY_CA_FILE?.trim();
   const candidates = [
-    env.OPENCLAW_GATEWAY_CA_FILE?.trim(),
+    explicit,
     openclawHome ? join(openclawHome, 'gateway', 'tls', 'gateway-cert.pem') : undefined,
   ].filter((p): p is string => Boolean(p));
 
-  let ca: string | undefined;
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      try {
-        ca = readFileSync(p, 'utf8');
-        break;
-      } catch {
-        // ignore read error
+  for (const [index, file] of candidates.entries()) {
+    if (!existsSync(file)) continue;
+    try {
+      const pem = readFileSync(file);
+      if (pem.length > 0) {
+        // CA from the OpenClaw itself: the cert has no SAN, so hostname verification
+        // fails anyway. Allowing the fallback avoids requiring manual configuration.
+        return { ca: pem, insecure, allowInsecureFallback: !explicit || index > 0 };
       }
+    } catch {
+      // try next
+    }
+  }
+  return { insecure };
+}
+
+/**
+ * Resolves the Gateway URL without manual configuration.
+ *
+ * OPENCLAW_GATEWAY_URL takes priority. Without it, reads <OPENCLAW_HOME>/openclaw.json,
+ * which carries the port and TLS of the Gateway, and picks a reachable host from inside the container.
+ */
+export function resolveOpenClawGatewayUrl(
+  env: NodeJS.ProcessEnv = process.env,
+  openclawHome?: string,
+): string | undefined {
+  const direct = env.OPENCLAW_GATEWAY_URL?.trim();
+  if (direct) return direct;
+  if (!openclawHome) return undefined;
+
+  const configPath = join(openclawHome, 'openclaw.json');
+  if (!existsSync(configPath)) return undefined;
+
+  let parsed: {
+    gateway?: {
+      port?: number;
+      tls?: { enabled?: boolean };
+      controlUi?: { allowedOrigins?: string[] };
+    };
+  };
+  try {
+    parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch {
+    return undefined;
+  }
+
+  const gateway = parsed?.gateway ?? {};
+  const port = typeof gateway.port === 'number' && gateway.port > 0 ? gateway.port : 18789;
+  const scheme = gateway.tls?.enabled === false ? 'http' : 'https';
+
+  // Loopback is excluded: inside the container it points to Habblaud itself.
+  const hosts: string[] = ['host.docker.internal'];
+  for (const origin of gateway.controlUi?.allowedOrigins ?? []) {
+    try {
+      const host = new URL(origin).hostname;
+      if (!host || hosts.includes(host)) continue;
+      if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') continue;
+      hosts.push(host);
+    } catch {
+      // invalid origin, skip
     }
   }
 
-  return { ca, insecure: insecure || Boolean(ca) };
+  return `${scheme}://${hosts[0]}:${port}`;
 }
 
 /**
@@ -296,9 +240,12 @@ export function resolveOpenClawToken(env: NodeJS.ProcessEnv = process.env, openc
 
 /**
  * Strips secrets or tokens from an error string before returning to callers.
+ * Includes cause details to aid diagnostics without leaking credentials.
  */
 function sanitizeError(err: unknown, token?: string): string {
   let msg = err instanceof Error ? err.message : String(err);
+  const cause = (err as { cause?: { code?: string; message?: string } } | null)?.cause;
+  if (cause) msg += ` (${cause.code ?? cause.message ?? String(cause)})`;
   if (token && token.length > 3) {
     msg = msg.replaceAll(token, '[REDACTED]');
   }
@@ -309,11 +256,13 @@ export class OpenClawGatewayClient {
   readonly gatewayUrl: string;
   activeGatewayUrl: string;
   private readonly token?: string;
-  private readonly ca?: string;
-  private readonly insecure: boolean;
+  private readonly ca?: Buffer;
+  private insecure: boolean;
+  private readonly allowInsecureFallback: boolean;
   private readonly model?: string;
   private readonly timeoutMs: number;
-  private readonly _fetchFn?: typeof fetch;
+  private readonly retryDelaysMs: number[];
+  private readonly _fetch?: typeof fetch;
   private reachable = false;
   private lastCheckAt = 0;
   private checking = false;
@@ -322,48 +271,141 @@ export class OpenClawGatewayClient {
     this.gatewayUrl = opts.gatewayUrl.replace(/\/+$/, '');
     this.activeGatewayUrl = this.gatewayUrl;
     this.token = opts.token;
-    this.ca = opts.ca;
+    this.ca = opts.ca ? (Buffer.isBuffer(opts.ca) ? opts.ca : Buffer.from(opts.ca)) : undefined;
     this.insecure = opts.insecure ?? false;
+    this.allowInsecureFallback = opts.allowInsecureFallback ?? false;
     this.model = opts.model;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
-    this._fetchFn = opts.fetchFn;
+    this.retryDelaysMs = opts.retryDelaysMs ?? [250, 750];
+    this._fetch = opts.fetchFn;
   }
 
   /**
-   * Internal request executor supporting fetchFn mock in tests or native httpRequest in production.
+   * Single attempt: wraps requestWithTls and handles cert fallback on first TLS error.
    */
-  private async performRequest(
+  private async requestOnce(
+    method: 'GET' | 'POST',
     url: string,
-    opts: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number },
-  ): Promise<HttpResponse> {
-    return withRetry(async () => {
-      if (this._fetchFn) {
-        const fetchRes = await this._fetchFn(url, {
-          method: opts.method || 'GET',
-          headers: opts.headers,
-          body: opts.body,
-          signal: AbortSignal.timeout(opts.timeoutMs || this.timeoutMs),
-        });
-        const headers: Record<string, string> = {};
-        fetchRes.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
-        return {
-          status: fetchRes.status,
-          statusText: fetchRes.statusText,
-          ok: fetchRes.ok,
-          headers,
-          text: () => fetchRes.text(),
-        };
+    headers: Record<string, string>,
+    body: string | undefined,
+    timeoutMs: number,
+  ): Promise<{ status: number; statusText: string; bodyText: string }> {
+    try {
+      return await this.requestWithTls(method, url, headers, body, timeoutMs);
+    } catch (err) {
+      // OpenClaw self-signed cert has no SAN: even with the right CA, hostname verification fails.
+      // Fall back to accepting the cert (read from the same OpenClaw dir) exactly once.
+      const code =
+        (err as { cause?: { code?: string } } | null)?.cause?.code ??
+        (err as { code?: string } | null)?.code;
+      if (
+        this.ca &&
+        !this.insecure &&
+        this.allowInsecureFallback &&
+        code &&
+        CERTIFICATE_ERROR_CODES.has(code)
+      ) {
+        this.insecure = true;
+        console.warn(
+          `[openclaw] Gateway cert did not validate (${code}); connecting without cert verification to ${url}`,
+        );
+        return this.requestWithTls(method, url, headers, body, timeoutMs);
       }
+      throw err;
+    }
+  }
 
-      return httpRequest(url, {
-        method: opts.method,
-        headers: opts.headers,
-        body: opts.body,
-        timeoutMs: opts.timeoutMs || this.timeoutMs,
-        ca: this.ca,
-        insecure: this.insecure,
+  /**
+   * Low-level transport: uses native node:https/node:http when CA or insecure is set,
+   * otherwise delegates to the injected fetch (keeps existing tests working unchanged).
+   */
+  private async requestWithTls(
+    method: 'GET' | 'POST',
+    url: string,
+    headers: Record<string, string>,
+    body: string | undefined,
+    timeoutMs: number,
+  ): Promise<{ status: number; statusText: string; bodyText: string }> {
+    // No CA and not insecure: existing fetch path keeps unit tests working.
+    if (!this.ca && !this.insecure) {
+      const fetchFn = this._fetch ?? fetch;
+      const res = await fetchFn(url, {
+        method,
+        headers,
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
       });
+      const status = res.status;
+      // 2xx and GET have no useful body: discard to avoid waiting for the stream end.
+      if (method === 'GET' || (status >= 200 && status < 300)) {
+        res.body?.cancel().catch(() => {});
+        return { status, statusText: res.statusText, bodyText: '' };
+      }
+      const bodyText = await res.text().catch(() => '');
+      return { status, statusText: res.statusText, bodyText };
+    }
+
+    return await new Promise((resolve, reject) => {
+      let u: URL;
+      try {
+        u = new URL(url);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const isHttps = u.protocol === 'https:';
+      const options = {
+        method,
+        headers: body ? { ...headers, 'Content-Length': String(Buffer.byteLength(body)) } : headers,
+        timeout: timeoutMs,
+        ...(isHttps ? { ca: this.ca, rejectUnauthorized: !this.insecure } : {}),
+      };
+
+      const req = (isHttps ? httpsRequest : httpRequest)(u, options, (res) => {
+        const status = res.statusCode ?? 0;
+        const statusText = res.statusMessage ?? '';
+        if (method === 'GET' || (status >= 200 && status < 300)) {
+          res.destroy();
+          resolve({ status, statusText, bodyText: '' });
+          return;
+        }
+        let bodyText = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          if (bodyText.length < 4096) bodyText += chunk;
+        });
+        res.on('end', () => resolve({ status, statusText, bodyText }));
+        res.on('error', () => resolve({ status, statusText, bodyText }));
+      });
+
+      req.on('timeout', () => {
+        req.destroy(Object.assign(new Error('gateway timeout'), { name: 'TimeoutError' }));
+      });
+      req.on('error', reject);
+      req.end(body);
     });
+  }
+
+  /** requestOnce with retry only for transient network failures. */
+  private async request(
+    method: 'GET' | 'POST',
+    url: string,
+    headers: Record<string, string>,
+    body?: string,
+    timeoutMs = this.timeoutMs,
+  ): Promise<{ status: number; statusText: string; bodyText: string }> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.requestOnce(method, url, headers, body, timeoutMs);
+      } catch (err) {
+        const code =
+          (err as { cause?: { code?: string } } | null)?.cause?.code ??
+          (err as { code?: string } | null)?.code;
+        const retryable = code ? RETRYABLE_NETWORK_CODES.has(code) : false;
+        if (!retryable || attempt >= this.retryDelaysMs.length) throw err;
+        await new Promise((r) => setTimeout(r, this.retryDelaysMs[attempt]));
+      }
+    }
   }
 
   /**
@@ -380,12 +422,8 @@ export class OpenClawGatewayClient {
       const endpoints = ['/api/sessions', '/v1/models', '/api/health', '/'];
       for (const ep of endpoints) {
         try {
-          const res = await this.performRequest(`${httpUrl}${ep}`, {
-            method: 'GET',
-            headers,
-            timeoutMs: DEFAULT_HEALTH_TIMEOUT_MS,
-          });
-          // Any HTTP status code (200, 401, 403, 404) proves an active HTTP service is reachable
+          const res = await this.request('GET', `${httpUrl}${ep}`, headers, undefined, DEFAULT_HEALTH_TIMEOUT_MS);
+          // Any HTTP status (200, 401, 403, 404) proves an active HTTP service is reachable
           if (typeof res?.status === 'number' && res.status > 0) {
             return true;
           }
@@ -401,7 +439,7 @@ export class OpenClawGatewayClient {
 
   /**
    * Checks if the OpenClaw Gateway is reachable.
-   * Preserves target protocol scheme (https/http) across auto-discovered candidate host addresses.
+   * Preserves target protocol scheme and port across auto-discovered candidate host addresses.
    * Caches reachability for up to 10 seconds.
    */
   async checkReachable(force = false): Promise<boolean> {
@@ -420,24 +458,23 @@ export class OpenClawGatewayClient {
         return true;
       }
 
-      // 2. Candidate fallbacks preserving current scheme
+      // 2. Candidate fallbacks preserving both scheme AND port from configured URL.
       const scheme = this.gatewayUrl.startsWith('https://') || this.gatewayUrl.startsWith('wss://') ? 'https' : 'http';
-      const gwIp = getContainerDefaultGateway();
-      const hosts = [
-        gwIp,
-        'host.docker.internal',
-        '172.17.0.1',
-        '172.18.0.1',
-        '172.19.0.1',
-        '172.20.0.1',
-        '127.0.0.1',
-        'openclaw',
-      ].filter(Boolean);
+      let port = 18789;
+      try {
+        const parsed = new URL(this.gatewayUrl.replace(/^ws(s?):\/\//, 'http$1://'));
+        if (parsed.port) port = Number(parsed.port);
+      } catch {
+        // keep default
+      }
 
-      const candidates = [
-        this.gatewayUrl,
-        ...hosts.map((h) => `${scheme}://${h}:18789`),
-      ].filter((u): u is string => Boolean(u && u !== this.activeGatewayUrl));
+      const gwIp = getContainerDefaultGateway();
+      const hosts = [gwIp, 'host.docker.internal', '172.17.0.1', '172.18.0.1', '172.19.0.1', '172.20.0.1', '127.0.0.1', 'openclaw']
+        .filter((h): h is string => Boolean(h));
+
+      const candidates = hosts
+        .map((h) => `${scheme}://${h}:${port}`)
+        .filter((u) => u !== this.activeGatewayUrl);
 
       for (const candidate of candidates) {
         if (await this.probeUrl(candidate)) {
@@ -488,34 +525,46 @@ export class OpenClawGatewayClient {
       if (wsResult.ok) return wsResult;
     }
 
-    // 2. HTTP POST /v1/chat/completions with stream: true and derived model
+    // 2. HTTP POST /v1/chat/completions with stream: true and model derived from sessionKey.
+    // The Gateway requires the explicit agent when multiple agents are configured;
+    // "openclaw" alone returns 400 (Multiple agents are configured).
+    const agentKey = /^agent:([^:]+):/.exec(job.sessionKey)?.[1];
+    const model = this.model ?? (agentKey ? `openclaw/${agentKey}` : 'openclaw');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-openclaw-session-key': job.sessionKey,
+    };
+    if (this.token) {
+      headers.Authorization = `Bearer ${this.token}`;
+    }
+
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: job.text }],
+      queueMode: 'followup',
+      // Without stream the response only arrives at the end of the turn (30s+) and
+      // exceeds the delivery timeout. With stream, 200 OK headers arrive immediately.
+      stream: true,
+    });
+
     try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'x-openclaw-session-key': job.sessionKey,
-      };
-      if (this.token) {
-        headers.Authorization = `Bearer ${this.token}`;
-      }
+      const res = await this.request('POST', `${httpUrl}/v1/chat/completions`, headers, body).catch(
+        async (err: unknown) => {
+          // Gateway host stopped resolving (Docker DNS blinking): re-discover the Gateway
+          // before giving up, instead of returning ENOTFOUND to the user.
+          const code =
+            (err as { cause?: { code?: string } } | null)?.cause?.code ??
+            (err as { code?: string } | null)?.code;
+          if (!code || !RETRYABLE_NETWORK_CODES.has(code)) throw err;
+          if (!(await this.checkReachable(true))) throw err;
+          const next = this.activeGatewayUrl.replace(/^ws(s?):\/\//, 'http$1://');
+          if (!next || next === httpUrl) throw err;
+          return this.request('POST', `${next}/v1/chat/completions`, headers, body);
+        },
+      );
 
-      const agentKey = /^agent:([^:]+):/.exec(job.sessionKey)?.[1];
-      const model = this.model ?? (agentKey ? `openclaw/${agentKey}` : 'openclaw');
-
-      const body = JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: job.text }],
-        queueMode: 'followup',
-        stream: true,
-      });
-
-      const res = await this.performRequest(`${httpUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers,
-        body,
-        timeoutMs: this.timeoutMs,
-      });
-
-      if (res.ok) {
+      if (res.status >= 200 && res.status < 300) {
         this.setReachable(true);
         return { ok: true };
       }
@@ -528,16 +577,15 @@ export class OpenClawGatewayClient {
         return { ok: false, error: tr('sessão não encontrada no Gateway do OpenClaw (404)') };
       }
 
-      const errText = await res.text().catch(() => '');
       return {
         ok: false,
         error: tr('o Gateway do OpenClaw recusou a mensagem ({0}): {1}', [
           String(res.status),
-          sanitizeError(errText, this.token) || res.statusText,
+          sanitizeError(res.bodyText, this.token) || res.statusText,
         ]),
       };
     } catch (err: any) {
-      if (err?.name === 'TimeoutError' || err?.code === 23 || err?.name === 'AbortError' || err?.message === 'ETIMEDOUT') {
+      if (err?.name === 'TimeoutError' || err?.code === 23 || err?.name === 'AbortError' || err?.message === 'ETIMEDOUT' || err?.message === 'gateway timeout') {
         return { ok: false, error: tr('o Gateway do OpenClaw não respondeu a tempo (tempo esgotado)') };
       }
       return { ok: false, error: sanitizeError(err, this.token) };

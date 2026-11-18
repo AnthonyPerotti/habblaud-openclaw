@@ -30,7 +30,7 @@ import { createPermissionRoutes } from './permissions/http';
 import { PermissionRegistry } from './permissions/registry';
 import { codexAccountOf } from './codex/http';
 import { createCodexQueueRunner, findCodexBin } from './messages/codex';
-import { createOpenClawDeliveryRunner, resolveOpenClawTls, resolveOpenClawToken } from './messages/openclaw';
+import { createOpenClawDeliveryRunner, resolveOpenClawGatewayUrl, resolveOpenClawTls, resolveOpenClawToken } from './messages/openclaw';
 import { createMessageRoutes } from './messages/http';
 import { MessageRegistry } from './messages/registry';
 import type { CodexLive } from './sources/codex/live';
@@ -132,11 +132,17 @@ const office = new Office({
   updates: () => updates.status(),
   world: () => world?.meta() ?? { enabled: false, configured: false, state: 'off' },
 });
+// OpenClaw: resolve TLS, token e URL do Gateway antes de qualquer uso (const nao sofre hoisting).
+// Sem OPENCLAW_GATEWAY_URL, a URL e deduzida do openclaw.json que ja esta montado em OPENCLAW_HOME.
+const openclawTls = resolveOpenClawTls(process.env, config.openclawHome);
+const openclawToken = resolveOpenClawToken(process.env, config.openclawHome) || config.openclawGatewayToken;
+const openclawGatewayUrl = resolveOpenClawGatewayUrl(process.env, config.openclawHome);
+
 // Fonte de agentes exclusiva: OpenClaw (observa SQLite e estado em OPENCLAW_HOME).
 const openclaw = new OpenClawSource({
   openclawHome: config.openclawHome,
-  gatewayUrl: config.openclawGatewayUrl,
-  gatewayToken: config.openclawGatewayToken,
+  gatewayUrl: openclawGatewayUrl,
+  gatewayToken: openclawToken,
   accounts,
   office,
 });
@@ -264,12 +270,10 @@ const dictation = config.messages
   ? new DictationService(whisper && !('missing' in whisper) ? { transcriber: createWhisperTranscriber(whisper) } : {})
   : undefined;
 
-// OpenClaw: entrega de mensagens pelo Gateway (HTTP POST /v1/chat/completions ou WS sessions.send com queueMode: followup)
-const openclawTls = resolveOpenClawTls(process.env, config.openclawHome);
-const openclawToken = resolveOpenClawToken(process.env, config.openclawHome) || config.openclawGatewayToken;
-const openclawDelivery = config.openclawGatewayUrl
+// OpenClaw: delivery runner usando as constantes ja resolvidas acima.
+const openclawDelivery = openclawGatewayUrl
   ? createOpenClawDeliveryRunner({
-      gatewayUrl: config.openclawGatewayUrl,
+      gatewayUrl: openclawGatewayUrl,
       token: openclawToken,
       ...openclawTls,
       model: process.env.OPENCLAW_MODEL?.trim() || undefined,
@@ -488,8 +492,8 @@ server.listen(config.port, config.host, () => {
   const host = config.host === '0.0.0.0' || config.host === '::' ? 'localhost' : config.host;
   log.info(tr('🏢 Habblaud (OpenClaw) {0}{1}{2} em http://{3}:{4}', [config.version, config.dev ? ' (dev)' : '', config.inDocker ? ' (docker)' : '', host, config.port]));
   log.info(`   OpenClaw: monitorando ${config.openclawHome}`);
-  if (config.openclawGatewayUrl) {
-    log.info(`   OpenClaw Gateway: ${config.openclawGatewayUrl}`);
+  if (openclawGatewayUrl) {
+    log.info(`   OpenClaw Gateway: ${openclawGatewayUrl}`);
   }
   for (const a of accounts.entries()) {
     log.info(`   Conta ${a.detected.short} (${a.id}): ${a.detected.name} · ${a.detected.plan ?? ''}`);
@@ -522,10 +526,10 @@ server.listen(config.port, config.host, () => {
           ? tr('   Mensagens ao Codex: pelo auxiliar do host (deixe npm run codex:bridge rodando no Mac).')
           : tr('   Mensagens ao Codex: sem o binário do Codex (codex no PATH ou HABBLAUD_CODEX_BIN); o auxiliar npm run codex:bridge também serve.'),
     );
-    if (config.openclawGatewayUrl) {
-      log.info(tr('   Mensagens ao OpenClaw: pelo Gateway ({0}).', [config.openclawGatewayUrl]));
+    if (openclawGatewayUrl) {
+      log.info(tr('   Mensagens ao OpenClaw: pelo Gateway ({0}).', [openclawGatewayUrl]));
     } else {
-      log.info(tr('   Mensagens ao OpenClaw: Gateway não configurado (OPENCLAW_GATEWAY_URL).'));
+      log.info(tr('   Mensagens ao OpenClaw: Gateway não configurado (OPENCLAW_GATEWAY_URL); URL sera deduzida do openclaw.json se disponivel.'));
     }
   }
   if (config.world.warning) log.warn(`   ${config.world.warning}.`);
