@@ -228,6 +228,9 @@ When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 | `OPENCLAW_HOME` | Absolute path to the OpenClaw state directory | `/openclaw` (Docker) or `~/.openclaw` |
 | `OPENCLAW_GATEWAY_URL` | OpenClaw Gateway endpoint URL | Unset |
 | `OPENCLAW_GATEWAY_TOKEN` | Bearer token for OpenClaw Gateway authentication | Unset |
+| `OPENCLAW_GATEWAY_CA_FILE` | Optional custom CA certificate file path for HTTPS Gateway | Auto-detected from `<OPENCLAW_HOME>/gateway/tls/gateway-cert.pem` |
+| `OPENCLAW_GATEWAY_TLS_INSECURE` | Accept TLS certificates without Subject Alternative Names (SAN) | `1` when local self-signed cert is detected, otherwise `0` |
+| `OPENCLAW_MODEL` | Explicit model override for Gateway prompt delivery | Auto-derived from `sessionKey` (`openclaw/<agentKey>`) |
 | `HABBLAUD_PORT` | HTTP port exposed by the Node server | `4747` |
 | `HABBLAUD_BIND` | Host bind address (`0.0.0.0` for all interfaces, `127.0.0.1` for local loopback) | `0.0.0.0` |
 | `HABBLAUD_TRUST_PROXY` | Enable terminal and messages when behind a trusted local reverse proxy or LAN setup | `1` |
@@ -316,6 +319,14 @@ npm run build
 # Start production server
 npm start
 ```
+
+## Acknowledgements and Credits
+
+This project was built upon the architecture and frontend design of [Habblaud](https://github.com/marmottajr/habblaud), created by [marmottajr](https://github.com/marmottajr).
+
+The original Habblaud project pioneered the virtual pixel art office concept for Claude Code and OpenAI Codex. Habblaud OpenClaw extends this foundation to provide native support for OpenClaw autonomous agents, subagent workspaces, dynamic transcript enrichment, and bidirectional Gateway communication.
+
+Gratitude to marmottajr and contributors for open-sourcing the core simulation, isometric rendering engine, and pixel art assets under the MIT License.
 
 ## License
 

@@ -30,7 +30,7 @@ import { createPermissionRoutes } from './permissions/http';
 import { PermissionRegistry } from './permissions/registry';
 import { codexAccountOf } from './codex/http';
 import { createCodexQueueRunner, findCodexBin } from './messages/codex';
-import { createOpenClawDeliveryRunner, resolveOpenClawToken } from './messages/openclaw';
+import { createOpenClawDeliveryRunner, resolveOpenClawTls, resolveOpenClawToken } from './messages/openclaw';
 import { createMessageRoutes } from './messages/http';
 import { MessageRegistry } from './messages/registry';
 import type { CodexLive } from './sources/codex/live';
@@ -265,11 +265,14 @@ const dictation = config.messages
   : undefined;
 
 // OpenClaw: entrega de mensagens pelo Gateway (HTTP POST /v1/chat/completions ou WS sessions.send com queueMode: followup)
+const openclawTls = resolveOpenClawTls(process.env, config.openclawHome);
 const openclawToken = resolveOpenClawToken(process.env, config.openclawHome) || config.openclawGatewayToken;
 const openclawDelivery = config.openclawGatewayUrl
   ? createOpenClawDeliveryRunner({
       gatewayUrl: config.openclawGatewayUrl,
       token: openclawToken,
+      ...openclawTls,
+      model: process.env.OPENCLAW_MODEL?.trim() || undefined,
     })
   : undefined;
 if (openclawDelivery) {
