@@ -7,6 +7,7 @@ import { errMsg, log } from '../../log';
 import type { Office } from '../../model/office';
 import type { AgentSource } from '../source';
 import { createTerminalParser, type TerminalParser } from '../terminal';
+import { describeTool } from '../../../shared/activity';
 import { buildOpenClawAccounts, discoverOpenClawAccounts, getAgentName } from './accounts';
 import { OpenClawHistory } from './history';
 import { findOpenClawDatabases, readSessionsFromDb, readSessionsFromJson } from './sqlite';
@@ -333,15 +334,35 @@ export class OpenClawSource implements AgentSource {
         this.opts.office.setStatus(agentId, status);
       }
 
-      // Synthesize activity
-      const activityText = s.model ? `Modelo: ${s.model}` : `Canal: ${channel}`;
-      const act: Activity = {
-        id: `act:${s.key}:${lastAt}`,
-        kind: status === 'working' ? 'think' : 'done',
-        icon: status === 'working' ? '🧠' : '☕',
-        text: status === 'working' ? `Processando (${activityText})` : `Aguardando (${activityText})`,
-        at: lastAt,
-      };
+      // Build activity: use last tool call when available, otherwise fall back to status text.
+      let act: Activity;
+      if (status === 'working' && s.lastToolName) {
+        const desc = describeTool(s.lastToolName, s.lastToolInput);
+        act = {
+          id: `act:${s.key}:${lastAt}`,
+          kind: desc.kind,
+          icon: desc.icon,
+          text: desc.text,
+          at: lastAt,
+        };
+      } else if (status === 'working' && s.lastActivityText) {
+        act = {
+          id: `act:${s.key}:${lastAt}`,
+          kind: 'think',
+          icon: '🧠',
+          text: s.lastActivityText.slice(0, 60),
+          at: lastAt,
+        };
+      } else {
+        const activityText = s.model ? `Modelo: ${s.model}` : `Canal: ${channel}`;
+        act = {
+          id: `act:${s.key}:${lastAt}`,
+          kind: status === 'working' ? 'think' : 'done',
+          icon: status === 'working' ? '🧠' : '☕',
+          text: status === 'working' ? `Processando (${activityText})` : `Aguardando (${activityText})`,
+          at: lastAt,
+        };
+      }
       this.opts.office.addActivity(agentId, act, true);
     }
 

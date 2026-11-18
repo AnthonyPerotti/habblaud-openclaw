@@ -297,20 +297,32 @@ export class SettingsPopover implements UiComponent {
       state === 'unsupported'
         ? tr('Este navegador não oferece notificações.')
         : state === 'denied'
-          ? tr('Bloqueadas pelo navegador: libere nas permissões do site.')
-          : tr('Avisa quando alguém precisa de você e a aba está em segundo plano.');
+          ? tr('Bloqueadas pelo navegador: clique no cadeado na barra de endereço e libere as notificações do site.')
+          : state === 'default'
+          ? tr('Clique para autorizar notificações (avisa quando precisa de você e quando uma tarefa conclui).')
+          : tr('Notificações ativas: avisa quando alguém precisa de você e quando uma tarefa é concluída.');
     setText(notif.hint, hint);
+    // Sync visual state with actual browser permission, not just the saved pref.
+    setAttr(notif.btn, 'aria-checked', String(state === 'granted' && this.ctx.prefs.browserNotifications));
     notif.btn.disabled = state === 'unsupported';
   }
 
   private async toggleNotifications(): Promise<void> {
-    if (this.ctx.prefs.browserNotifications) {
+    const current = notificationState();
+    // When already denied by browser, remind the user where to unblock instead of trying again.
+    if (current === 'denied') {
+      this.ctx.announce(tr('Notificações bloqueadas pelo navegador. Clique no cadeado na barra de endereço e permita as notificações deste site.'));
+      return;
+    }
+    if (this.ctx.prefs.browserNotifications && current === 'granted') {
       this.ctx.updatePrefs({ browserNotifications: false });
       return;
     }
     const state = await this.notifier.enableBrowserNotifications();
     this.ctx.updatePrefs({ browserNotifications: state === 'granted' });
-    if (state === 'denied') this.ctx.announce(tr('Notificações bloqueadas pelo navegador.'));
+    if (state === 'granted') this.ctx.announce(tr('Notificações ativadas.'));
+    else if (state === 'denied') this.ctx.announce(tr('Notificações bloqueadas pelo navegador.'));
+    this.render();
   }
 
   private async toggleDemo(): Promise<void> {

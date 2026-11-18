@@ -1,0 +1,291 @@
+﻿diff --git a/client/src/net/store.ts b/client/src/net/store.ts
+index eb16934..c029c3c 100644
+--- a/client/src/net/store.ts
++++ b/client/src/net/store.ts
+@@ -344,7 +344,8 @@ export class OfficeStore {
+   private mockSend(agentId: string, text: string): { message: OutboxMessage } | { error: string } {
+     const a = this.agent(agentId);
+     if (!a) return { error: tr('agente desconhecido: ele já saiu do escritório?') };
+-    if (!a.canMessage || a.kind !== 'main' || a.status === 'offline') return { error: tr('este agente não recebe mensagens agora') };
++    // OpenClaw sub-sessions are real message targets routed via Gateway; skip the main-only guard for them.
++    if (!a.canMessage || (a.kind !== 'main' && a.provider !== 'openclaw') || a.status === 'offline') return { error: tr('este agente não recebe mensagens agora') };
+     const now = Date.now();
+     const msg: OutboxMessage = { id: `mock-${now.toString(36)}-${++this.mockSeq}`, agentId, status: 'queued', createdAt: now, updatedAt: now };
+     this.mockOutbox.set(msg.id, msg);
+diff --git a/client/src/ui/composer-model.ts b/client/src/ui/composer-model.ts
+index e8b544d..9ec9695 100644
+--- a/client/src/ui/composer-model.ts
++++ b/client/src/ui/composer-model.ts
+@@ -29,13 +29,14 @@ export interface ComposerEnv {
+ 
+ export function composerMode(agent: AgentInfo | undefined, env: ComposerEnv): ComposerMode {
+   if (env.replaying) return { kind: 'off', text: tr('Sem mensagens no timelapse: o escritório mostrado é o de outro momento') };
+-  if (agent?.kind === 'sub') return { kind: 'off', text: tr('Subagentes não recebem mensagens: escreva para o agente principal') };
++  // OpenClaw sub-sessions (dashboard, spawns) are real message targets routed via Gateway.
++  if (agent?.kind === 'sub' && agent.provider !== 'openclaw') return { kind: 'off', text: tr('Subagentes não recebem mensagens: escreva para o agente principal') };
+   if (!agent || agent.status === 'offline' || agent.status === 'done') return { kind: 'off', text: tr('Sessão encerrada') };
+   const codex = agent.provider === 'codex';
+   const openclaw = agent.provider === 'openclaw';
+   if (!env.enabled) return { kind: 'off', text: codex ? tr('Para responder, use o Codex') : openclaw ? tr('Para responder, use o OpenClaw') : tr('Para responder, use o terminal do Claude Code') };
+   if (!env.local) return { kind: 'off', text: tr('Para mandar mensagens por aqui, abra o Habblaud por http://localhost (ou 127.0.0.1)') };
+-  if (!agent.canMessage) return { kind: 'hint', text: codex ? CODEX_BRIDGE_HINT : PLUGIN_HINT };
++  if (!agent.canMessage) return { kind: 'hint', text: codex ? CODEX_BRIDGE_HINT : openclaw ? tr('Gateway do OpenClaw não alcançável: verifique a URL e o token (OPENCLAW_GATEWAY_URL)') : PLUGIN_HINT };
+   return { kind: 'ready' };
+ }
+ 
+diff --git a/client/src/ui/notify.ts b/client/src/ui/notify.ts
+index b4da2d6..1320032 100644
+--- a/client/src/ui/notify.ts
++++ b/client/src/ui/notify.ts
+@@ -52,9 +52,14 @@ export class Notifier implements UiComponent {
+     // o sino toca mesmo com a aba oculta (é ele que chama você de volta); o estalo, só com ela à vista
+     if (n.level === 'alert') this.sounds.play('chime');
+     else if (n.level === 'success') this.sounds.play('pop');
+-    if (n.level === 'alert' && prefs.browserNotifications && document.hidden && notificationState() === 'granted') {
++    const wantsBrowserNotif = prefs.browserNotifications && notificationState() === 'granted';
++    // "alert" = precisa de você (permissão, pergunta). "success" = agente concluiu.
++    // Browser notification fires only when the tab is hidden to avoid double feedback.
++    if (wantsBrowserNotif && document.hidden && (n.level === 'alert' || n.level === 'success')) {
++      const title =
++        n.level === 'alert' ? tr('Habblaud — precisa de você') : tr('Habblaud — tarefa concluída');
+       try {
+-        const notification = new Notification(tr('Habblaud — precisa de você'), {
++        const notification = new Notification(title, {
+           body: n.text,
+           tag: n.agentId ?? n.id,
+           icon: '/assets/brand/favicon-32.png',
+diff --git a/client/src/ui/settings.ts b/client/src/ui/settings.ts
+index b1b998d..abf4a02 100644
+--- a/client/src/ui/settings.ts
++++ b/client/src/ui/settings.ts
+@@ -297,20 +297,32 @@ export class SettingsPopover implements UiComponent {
+       state === 'unsupported'
+         ? tr('Este navegador não oferece notificações.')
+         : state === 'denied'
+-          ? tr('Bloqueadas pelo navegador: libere nas permissões do site.')
+-          : tr('Avisa quando alguém precisa de você e a aba está em segundo plano.');
++          ? tr('Bloqueadas pelo navegador: clique no cadeado na barra de endereço e libere as notificações do site.')
++          : state === 'default'
++          ? tr('Clique para autorizar notificações (avisa quando precisa de você e quando uma tarefa conclui).')
++          : tr('Notificações ativas: avisa quando alguém precisa de você e quando uma tarefa é concluída.');
+     setText(notif.hint, hint);
++    // Sync visual state with actual browser permission, not just the saved pref.
++    setAttr(notif.btn, 'aria-checked', String(state === 'granted' && this.ctx.prefs.browserNotifications));
+     notif.btn.disabled = state === 'unsupported';
+   }
+ 
+   private async toggleNotifications(): Promise<void> {
+-    if (this.ctx.prefs.browserNotifications) {
++    const current = notificationState();
++    // When already denied by browser, remind the user where to unblock instead of trying again.
++    if (current === 'denied') {
++      this.ctx.announce(tr('Notificações bloqueadas pelo navegador. Clique no cadeado na barra de endereço e permita as notificações deste site.'));
++      return;
++    }
++    if (this.ctx.prefs.browserNotifications && current === 'granted') {
+       this.ctx.updatePrefs({ browserNotifications: false });
+       return;
+     }
+     const state = await this.notifier.enableBrowserNotifications();
+     this.ctx.updatePrefs({ browserNotifications: state === 'granted' });
+-    if (state === 'denied') this.ctx.announce(tr('Notificações bloqueadas pelo navegador.'));
++    if (state === 'granted') this.ctx.announce(tr('Notificações ativadas.'));
++    else if (state === 'denied') this.ctx.announce(tr('Notificações bloqueadas pelo navegador.'));
++    this.render();
+   }
+ 
+   private async toggleDemo(): Promise<void> {
+diff --git a/server/config.ts b/server/config.ts
+index 6bef670..e6f5958 100644
+--- a/server/config.ts
++++ b/server/config.ts
+@@ -253,7 +253,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: string[]
+     home,
+     claudeDirs: discoverClaudeDirs(env, home),
+     openclawHome: resolve(env.OPENCLAW_HOME?.trim() || env.OPENCLAW_DIR?.trim() || env.OPENCLAW_STATE_DIR?.trim() || (inDocker ? '/openclaw' : join(home, '.openclaw'))),
+-    openclawGatewayUrl: env.OPENCLAW_GATEWAY_URL?.trim() || undefined,
++    openclawGatewayUrl: env.OPENCLAW_GATEWAY_URL?.trim() || (inDocker ? 'http://openclaw:18789' : 'http://127.0.0.1:18789'),
+     openclawGatewayToken: env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined,
+     dataDir: resolve(env.HABBLAUD_DATA_DIR?.trim() || (inDocker ? '/data' : join(home, '.habblaud'))),
+     usageDir: resolve(env.HABBLAUD_USAGE_DIR?.trim() || join(home, '.habblaud', 'usage')),
+diff --git a/server/messages/registry.ts b/server/messages/registry.ts
+index 2d1f30d..bd4b043 100644
+--- a/server/messages/registry.ts
++++ b/server/messages/registry.ts
+@@ -165,7 +165,8 @@ const isFinal = (e: Entry) => e.msg.status === 'delivered' || e.msg.status === '
+  * no Codex/OpenClaw, há entregador configurado e alcançável).
+  */
+ function unavailableReason(a: AgentInfo, reachable: boolean): string | undefined {
+-  if (a.kind !== 'main') return tr('subagentes não recebem mensagens: mande para o agente principal');
++  // OpenClaw subagents (dashboard sessions, spawns) also accept messages via Gateway.
++  if (a.kind !== 'main' && a.provider !== 'openclaw') return tr('subagentes não recebem mensagens: mande para o agente principal');
+   if (!present(a)) return tr('o agente já saiu do escritório');
+   if (!reachable) {
+     if (a.provider === 'codex') return ERR_CODEX_UNAVAILABLE;
+@@ -253,14 +254,16 @@ export class MessageRegistry {
+     const out = new Set<string>();
+     for (const id of this.seen.keys()) if (this.canMessage(id)) out.add(id);
+     if (this.codexAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'codex' && a.kind === 'main' && present(a)) out.add(a.id);
+-    if (this.openclawAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'openclaw' && a.kind === 'main' && present(a)) out.add(a.id);
++    // OpenClaw: main agents AND sub-agents (dashboard/spawn sessions) can receive messages via Gateway.
++    if (this.openclawAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'openclaw' && present(a)) out.add(a.id);
+     return out;
+   }
+ 
+   canMessage(agentId: string): boolean {
+     const a = this.opts.office.get(agentId);
+     if (a?.provider === 'codex') return this.codexAvailable() && present(a) && a.kind === 'main';
+-    if (a?.provider === 'openclaw') return this.openclawAvailable() && present(a) && a.kind === 'main';
++    // OpenClaw: any session (main or sub) can receive messages via Gateway when it is reachable.
++    if (a?.provider === 'openclaw') return this.openclawAvailable() && present(a);
+     const at = this.seen.get(agentId);
+     if (at === undefined || this.now() - at >= this.presenceMs) return false;
+     return present(a) && a.kind === 'main';
+diff --git a/server/sources/openclaw/source.ts b/server/sources/openclaw/source.ts
+index dcadf4b..f409cee 100644
+--- a/server/sources/openclaw/source.ts
++++ b/server/sources/openclaw/source.ts
+@@ -7,6 +7,7 @@ import { errMsg, log } from '../../log';
+ import type { Office } from '../../model/office';
+ import type { AgentSource } from '../source';
+ import { createTerminalParser, type TerminalParser } from '../terminal';
++import { describeTool } from '../../../shared/activity';
+ import { buildOpenClawAccounts, discoverOpenClawAccounts, getAgentName } from './accounts';
+ import { OpenClawHistory } from './history';
+ import { findOpenClawDatabases, readSessionsFromDb, readSessionsFromJson } from './sqlite';
+@@ -333,15 +334,35 @@ export class OpenClawSource implements AgentSource {
+         this.opts.office.setStatus(agentId, status);
+       }
+ 
+-      // Synthesize activity
+-      const activityText = s.model ? `Modelo: ${s.model}` : `Canal: ${channel}`;
+-      const act: Activity = {
+-        id: `act:${s.key}:${lastAt}`,
+-        kind: status === 'working' ? 'think' : 'done',
+-        icon: status === 'working' ? '🧠' : '☕',
+-        text: status === 'working' ? `Processando (${activityText})` : `Aguardando (${activityText})`,
+-        at: lastAt,
+-      };
++      // Build activity: use last tool call when available, otherwise fall back to status text.
++      let act: Activity;
++      if (status === 'working' && s.lastToolName) {
++        const desc = describeTool(s.lastToolName, s.lastToolInput);
++        act = {
++          id: `act:${s.key}:${lastAt}`,
++          kind: desc.kind,
++          icon: desc.icon,
++          text: desc.text,
++          at: lastAt,
++        };
++      } else if (status === 'working' && s.lastActivityText) {
++        act = {
++          id: `act:${s.key}:${lastAt}`,
++          kind: 'think',
++          icon: '🧠',
++          text: s.lastActivityText.slice(0, 60),
++          at: lastAt,
++        };
++      } else {
++        const activityText = s.model ? `Modelo: ${s.model}` : `Canal: ${channel}`;
++        act = {
++          id: `act:${s.key}:${lastAt}`,
++          kind: status === 'working' ? 'think' : 'done',
++          icon: status === 'working' ? '🧠' : '☕',
++          text: status === 'working' ? `Processando (${activityText})` : `Aguardando (${activityText})`,
++          at: lastAt,
++        };
++      }
+       this.opts.office.addActivity(agentId, act, true);
+     }
+ 
+diff --git a/server/sources/openclaw/sqlite.ts b/server/sources/openclaw/sqlite.ts
+index 8310bb8..7889697 100644
+--- a/server/sources/openclaw/sqlite.ts
++++ b/server/sources/openclaw/sqlite.ts
+@@ -322,6 +322,70 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
+         }
+ 
+         allSessions.push(...sessionMap.values());
++
++        // Enrich sessions with the last tool call from transcript for speech bubbles.
++        // Best-effort: any error here never breaks session sync.
++        try {
++          const transcriptTable = tableNames.has('transcript_events') ? 'transcript_events'
++            : tableNames.has('transcript_nodes') ? 'transcript_nodes'
++            : null;
++          if (transcriptTable) {
++            const tCols = db.prepare(`PRAGMA table_info(${transcriptTable})`).all() as Array<{ name: string }>;
++            const tColSet = new Set(tCols.map((c) => c.name));
++            const payloadCol = tColSet.has('event_json') ? 'event_json'
++              : tColSet.has('payload') ? 'payload'
++              : tColSet.has('data') ? 'data'
++              : null;
++            const keyCol = tColSet.has('session_key') ? 'session_key'
++              : tColSet.has('session_id') ? 'session_id'
++              : null;
++            if (payloadCol && keyCol) {
++              const orderCol = tColSet.has('created_at') ? 'created_at'
++                : tColSet.has('id') ? 'id'
++                : 'rowid';
++              const recentRows = db
++                .prepare(`SELECT ${keyCol}, ${payloadCol} FROM ${transcriptTable} ORDER BY ${orderCol} DESC LIMIT 500`)
++                .all() as Array<Record<string, unknown>>;
++              const enriched = new Set<string>();
++              for (const row of recentRows) {
++                const sk = String(row[keyCol] ?? '');
++                if (!sk || enriched.has(sk)) continue;
++                const rawPayload = decompressPayload(row[payloadCol]);
++                if (!rawPayload) continue;
++                let ev: any;
++                try { ev = JSON.parse(rawPayload); } catch { continue; }
++                const inner = ev?.event ?? ev?.content ?? ev;
++                if (!inner) continue;
++                const toolName: string | undefined =
++                  inner.type === 'tool_use' ? inner.name :
++                  ev.type === 'tool_use' ? ev.name :
++                  inner.tool?.name ?? inner.toolName ?? undefined;
++                const toolInput: unknown =
++                  inner.type === 'tool_use' ? inner.input :
++                  ev.type === 'tool_use' ? ev.input :
++                  inner.tool?.input ?? inner.toolInput ?? undefined;
++                const activityText: string | undefined =
++                  typeof inner.text === 'string' && inner.text.trim()
++                    ? inner.text.trim().slice(0, 80)
++                    : typeof ev.text === 'string' && ev.text.trim()
++                    ? ev.text.trim().slice(0, 80)
++                    : undefined;
++                if (!toolName && !activityText) continue;
++                const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
++                if (!session) continue;
++                enriched.add(sk);
++                if (toolName) {
++                  session.lastToolName = toolName;
++                  session.lastToolInput = toolInput;
++                } else if (activityText) {
++                  session.lastActivityText = activityText;
++                }
++              }
++            }
++          }
++        } catch {
++          // Non-critical enrichment: ignore all errors.
++        }
+       } catch (branchErr) {
+         // A failure reading session_nodes does not abort the sessions table branch below (P1-1).
+         log.warn(`[OpenClaw] session_nodes branch failed for ${dbPath}: ${String(branchErr)}`);
+diff --git a/server/sources/openclaw/types.ts b/server/sources/openclaw/types.ts
+index 65188b3..63e415e 100644
+--- a/server/sources/openclaw/types.ts
++++ b/server/sources/openclaw/types.ts
+@@ -35,6 +35,11 @@ export interface OpenClawSession {
+   thinkingLevel?: string;
+   abortedLastRun?: boolean;
+   sessionRoot?: string;
++  /** Most recent tool call name and input extracted from transcript, used to populate speech bubbles. */
++  lastToolName?: string;
++  lastToolInput?: unknown;
++  /** Plain-text summary of the last activity (fallback when no structured tool data). */
++  lastActivityText?: string;
+ }
+ 
+ export interface OpenClawSessionsPayload {

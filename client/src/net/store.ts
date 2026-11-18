@@ -344,7 +344,8 @@ export class OfficeStore {
   private mockSend(agentId: string, text: string): { message: OutboxMessage } | { error: string } {
     const a = this.agent(agentId);
     if (!a) return { error: tr('agente desconhecido: ele já saiu do escritório?') };
-    if (!a.canMessage || a.kind !== 'main' || a.status === 'offline') return { error: tr('este agente não recebe mensagens agora') };
+    // OpenClaw sub-sessions are real message targets routed via Gateway; skip the main-only guard for them.
+    if (!a.canMessage || (a.kind !== 'main' && a.provider !== 'openclaw') || a.status === 'offline') return { error: tr('este agente não recebe mensagens agora') };
     const now = Date.now();
     const msg: OutboxMessage = { id: `mock-${now.toString(36)}-${++this.mockSeq}`, agentId, status: 'queued', createdAt: now, updatedAt: now };
     this.mockOutbox.set(msg.id, msg);

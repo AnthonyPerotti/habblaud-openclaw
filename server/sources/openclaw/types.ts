@@ -35,6 +35,11 @@ export interface OpenClawSession {
   thinkingLevel?: string;
   abortedLastRun?: boolean;
   sessionRoot?: string;
+  /** Most recent tool call name and input extracted from transcript, used to populate speech bubbles. */
+  lastToolName?: string;
+  lastToolInput?: unknown;
+  /** Plain-text summary of the last activity (fallback when no structured tool data). */
+  lastActivityText?: string;
 }
 
 export interface OpenClawSessionsPayload {

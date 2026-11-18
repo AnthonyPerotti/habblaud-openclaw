@@ -253,7 +253,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, argv: string[] 
     home,
     claudeDirs: discoverClaudeDirs(env, home),
     openclawHome: resolve(env.OPENCLAW_HOME?.trim() || env.OPENCLAW_DIR?.trim() || env.OPENCLAW_STATE_DIR?.trim() || (inDocker ? '/openclaw' : join(home, '.openclaw'))),
-    openclawGatewayUrl: env.OPENCLAW_GATEWAY_URL?.trim() || undefined,
+    openclawGatewayUrl: env.OPENCLAW_GATEWAY_URL?.trim() || (inDocker ? 'http://openclaw:18789' : 'http://127.0.0.1:18789'),
     openclawGatewayToken: env.OPENCLAW_GATEWAY_TOKEN?.trim() || undefined,
     dataDir: resolve(env.HABBLAUD_DATA_DIR?.trim() || (inDocker ? '/data' : join(home, '.habblaud'))),
     usageDir: resolve(env.HABBLAUD_USAGE_DIR?.trim() || join(home, '.habblaud', 'usage')),

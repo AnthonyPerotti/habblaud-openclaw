@@ -52,9 +52,14 @@ export class Notifier implements UiComponent {
     // o sino toca mesmo com a aba oculta (é ele que chama você de volta); o estalo, só com ela à vista
     if (n.level === 'alert') this.sounds.play('chime');
     else if (n.level === 'success') this.sounds.play('pop');
-    if (n.level === 'alert' && prefs.browserNotifications && document.hidden && notificationState() === 'granted') {
+    const wantsBrowserNotif = prefs.browserNotifications && notificationState() === 'granted';
+    // "alert" = precisa de você (permissão, pergunta). "success" = agente concluiu.
+    // Browser notification fires only when the tab is hidden to avoid double feedback.
+    if (wantsBrowserNotif && document.hidden && (n.level === 'alert' || n.level === 'success')) {
+      const title =
+        n.level === 'alert' ? tr('Habblaud — precisa de você') : tr('Habblaud — tarefa concluída');
       try {
-        const notification = new Notification(tr('Habblaud — precisa de você'), {
+        const notification = new Notification(title, {
           body: n.text,
           tag: n.agentId ?? n.id,
           icon: '/assets/brand/favicon-32.png',

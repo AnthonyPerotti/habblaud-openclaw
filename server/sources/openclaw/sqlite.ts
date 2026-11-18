@@ -322,6 +322,70 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
         }
 
         allSessions.push(...sessionMap.values());
+
+        // Enrich sessions with the last tool call from transcript for speech bubbles.
+        // Best-effort: any error here never breaks session sync.
+        try {
+          const transcriptTable = tableNames.has('transcript_events') ? 'transcript_events'
+            : tableNames.has('transcript_nodes') ? 'transcript_nodes'
+            : null;
+          if (transcriptTable) {
+            const tCols = db.prepare(`PRAGMA table_info(${transcriptTable})`).all() as Array<{ name: string }>;
+            const tColSet = new Set(tCols.map((c) => c.name));
+            const payloadCol = tColSet.has('event_json') ? 'event_json'
+              : tColSet.has('payload') ? 'payload'
+              : tColSet.has('data') ? 'data'
+              : null;
+            const keyCol = tColSet.has('session_key') ? 'session_key'
+              : tColSet.has('session_id') ? 'session_id'
+              : null;
+            if (payloadCol && keyCol) {
+              const orderCol = tColSet.has('created_at') ? 'created_at'
+                : tColSet.has('id') ? 'id'
+                : 'rowid';
+              const recentRows = db
+                .prepare(`SELECT ${keyCol}, ${payloadCol} FROM ${transcriptTable} ORDER BY ${orderCol} DESC LIMIT 500`)
+                .all() as Array<Record<string, unknown>>;
+              const enriched = new Set<string>();
+              for (const row of recentRows) {
+                const sk = String(row[keyCol] ?? '');
+                if (!sk || enriched.has(sk)) continue;
+                const rawPayload = decompressPayload(row[payloadCol]);
+                if (!rawPayload) continue;
+                let ev: any;
+                try { ev = JSON.parse(rawPayload); } catch { continue; }
+                const inner = ev?.event ?? ev?.content ?? ev;
+                if (!inner) continue;
+                const toolName: string | undefined =
+                  inner.type === 'tool_use' ? inner.name :
+                  ev.type === 'tool_use' ? ev.name :
+                  inner.tool?.name ?? inner.toolName ?? undefined;
+                const toolInput: unknown =
+                  inner.type === 'tool_use' ? inner.input :
+                  ev.type === 'tool_use' ? ev.input :
+                  inner.tool?.input ?? inner.toolInput ?? undefined;
+                const activityText: string | undefined =
+                  typeof inner.text === 'string' && inner.text.trim()
+                    ? inner.text.trim().slice(0, 80)
+                    : typeof ev.text === 'string' && ev.text.trim()
+                    ? ev.text.trim().slice(0, 80)
+                    : undefined;
+                if (!toolName && !activityText) continue;
+                const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
+                if (!session) continue;
+                enriched.add(sk);
+                if (toolName) {
+                  session.lastToolName = toolName;
+                  session.lastToolInput = toolInput;
+                } else if (activityText) {
+                  session.lastActivityText = activityText;
+                }
+              }
+            }
+          }
+        } catch {
+          // Non-critical enrichment: ignore all errors.
+        }
       } catch (branchErr) {
         // A failure reading session_nodes does not abort the sessions table branch below (P1-1).
         log.warn(`[OpenClaw] session_nodes branch failed for ${dbPath}: ${String(branchErr)}`);

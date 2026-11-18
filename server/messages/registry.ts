@@ -165,7 +165,8 @@ const isFinal = (e: Entry) => e.msg.status === 'delivered' || e.msg.status === '
  * no Codex/OpenClaw, há entregador configurado e alcançável).
  */
 function unavailableReason(a: AgentInfo, reachable: boolean): string | undefined {
-  if (a.kind !== 'main') return tr('subagentes não recebem mensagens: mande para o agente principal');
+  // OpenClaw subagents (dashboard sessions, spawns) also accept messages via Gateway.
+  if (a.kind !== 'main' && a.provider !== 'openclaw') return tr('subagentes não recebem mensagens: mande para o agente principal');
   if (!present(a)) return tr('o agente já saiu do escritório');
   if (!reachable) {
     if (a.provider === 'codex') return ERR_CODEX_UNAVAILABLE;
@@ -253,14 +254,16 @@ export class MessageRegistry {
     const out = new Set<string>();
     for (const id of this.seen.keys()) if (this.canMessage(id)) out.add(id);
     if (this.codexAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'codex' && a.kind === 'main' && present(a)) out.add(a.id);
-    if (this.openclawAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'openclaw' && a.kind === 'main' && present(a)) out.add(a.id);
+    // OpenClaw: main agents AND sub-agents (dashboard/spawn sessions) can receive messages via Gateway.
+    if (this.openclawAvailable()) for (const a of this.opts.office.list()) if (a.provider === 'openclaw' && present(a)) out.add(a.id);
     return out;
   }
 
   canMessage(agentId: string): boolean {
     const a = this.opts.office.get(agentId);
     if (a?.provider === 'codex') return this.codexAvailable() && present(a) && a.kind === 'main';
-    if (a?.provider === 'openclaw') return this.openclawAvailable() && present(a) && a.kind === 'main';
+    // OpenClaw: any session (main or sub) can receive messages via Gateway when it is reachable.
+    if (a?.provider === 'openclaw') return this.openclawAvailable() && present(a);
     const at = this.seen.get(agentId);
     if (at === undefined || this.now() - at >= this.presenceMs) return false;
     return present(a) && a.kind === 'main';
