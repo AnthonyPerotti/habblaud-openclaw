@@ -38,6 +38,8 @@ export interface OpenClawSession {
   /** Most recent tool call name and input extracted from transcript, used to populate speech bubbles. */
   lastToolName?: string;
   lastToolInput?: unknown;
+  /** Whether the last tool call is still active / awaiting user response or execution. */
+  isToolPending?: boolean;
   /** Plain-text summary of the last activity (fallback when no structured tool data). */
   lastActivityText?: string;
 }

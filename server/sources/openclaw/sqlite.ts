@@ -324,19 +324,44 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
 
         allSessions.push(...sessionMap.values());
 
-        // Fast transcript enrichment for speech bubbles.
+        // Fast transcript enrichment for speech bubbles and waiting/intervention detection.
         // Uses native SQLite rowid ordering (O(1) B-tree lookup, zero sorting, zero table scan).
-        // Reads at most 50 recent rows to catch active tool calls across multiple concurrent sessions.
+        // Reads at most 60 recent rows to catch active tool calls across multiple concurrent sessions.
         try {
           if (tableNames.has('transcript_events')) {
             const recentRows = db
-              .prepare(`SELECT * FROM transcript_events ORDER BY rowid DESC LIMIT 50`)
+              .prepare(`SELECT * FROM transcript_events ORDER BY rowid DESC LIMIT 60`)
               .all() as Array<Record<string, unknown>>;
 
-            const enriched = new Set<string>();
+            interface SessionTracker {
+              answeredToolIds: Set<string>;
+              hasRecentResult: boolean;
+              hasRecentAssistantMessage: boolean;
+              pendingToolName?: string;
+              pendingToolInput?: unknown;
+              latestToolName?: string;
+              latestToolInput?: unknown;
+              latestText?: string;
+            }
+
+            const trackers = new Map<string, SessionTracker>();
+
             for (const row of recentRows) {
               const sk = String(row.session_key || row.session_id || '');
-              if (!sk || enriched.has(sk)) continue;
+              if (!sk) continue;
+
+              const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
+              if (!session) continue;
+
+              let tr = trackers.get(sk);
+              if (!tr) {
+                tr = {
+                  answeredToolIds: new Set<string>(),
+                  hasRecentResult: false,
+                  hasRecentAssistantMessage: false,
+                };
+                trackers.set(sk, tr);
+              }
 
               const rawData = row.entry_json || row.payload || row.data || row.event_json || row.content;
               const rawPayload = decompressPayload(rawData);
@@ -348,39 +373,105 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
               const inner = ev?.event ?? ev?.content ?? ev?.message ?? ev;
               if (!inner) continue;
 
-              let toolName: string | undefined =
-                inner.type === 'tool_use' || inner.type === 'toolCall' ? inner.name
-                : ev.type === 'tool_use' || ev.type === 'toolCall' ? ev.name
-                : inner.tool?.name ?? inner.toolName ?? undefined;
+              const role = ev?.role ?? inner?.role;
 
-              let toolInput: unknown =
-                inner.type === 'tool_use' || inner.type === 'toolCall' ? (inner.input ?? inner.arguments)
-                : ev.type === 'tool_use' || ev.type === 'toolCall' ? (ev.input ?? ev.arguments)
-                : inner.tool?.input ?? inner.toolInput ?? undefined;
+              // Inspect blocks inside content arrays (Anthropic/OpenClaw standard format)
+              const blocks: any[] = Array.isArray(inner)
+                ? inner
+                : Array.isArray(inner?.content)
+                ? inner.content
+                : Array.isArray(ev?.content)
+                ? ev.content
+                : [inner];
 
-              if (!toolName && Array.isArray(inner.tool_calls) && inner.tool_calls[0]) {
-                toolName = inner.tool_calls[0].name || inner.tool_calls[0].function?.name;
-                toolInput = inner.tool_calls[0].input || inner.tool_calls[0].function?.arguments;
+              for (const b of blocks) {
+                if (!b || typeof b !== 'object') continue;
+
+                // Tool result / user answer block
+                if (b.type === 'tool_result' || b.type === 'toolResult' || b.type === 'tool_response' || role === 'tool') {
+                  const resId = String(b.tool_use_id || b.toolUseId || b.id || '');
+                  if (resId) tr.answeredToolIds.add(resId);
+                  tr.hasRecentResult = true;
+                }
+                // Tool use / function call block
+                else if (b.type === 'tool_use' || b.type === 'toolCall' || b.type === 'tool_call') {
+                  const name = String(b.name || b.tool || b.toolName || '');
+                  const input = b.input ?? b.arguments;
+                  const callId = String(b.id || b.tool_use_id || '');
+
+                  if (name) {
+                    if (!tr.latestToolName) {
+                      tr.latestToolName = name;
+                      tr.latestToolInput = input;
+                    }
+
+                    // A tool is pending only if no tool_result or subsequent assistant turn was seen above it
+                    const isAnswered = (callId && tr.answeredToolIds.has(callId)) || tr.hasRecentResult || tr.hasRecentAssistantMessage;
+                    if (!isAnswered && !tr.pendingToolName) {
+                      tr.pendingToolName = name;
+                      tr.pendingToolInput = input;
+                    }
+                  }
+                }
+                // Assistant text / thought
+                else if (typeof b.text === 'string' && b.text.trim()) {
+                  if (!tr.latestText) tr.latestText = b.text.trim().slice(0, 80);
+                  if (role === 'assistant') tr.hasRecentAssistantMessage = true;
+                }
               }
 
-              const activityText: string | undefined =
-                typeof inner.text === 'string' && inner.text.trim()
-                  ? inner.text.trim().slice(0, 80)
-                  : typeof ev.text === 'string' && ev.text.trim()
-                  ? ev.text.trim().slice(0, 80)
-                  : undefined;
+              // Also check OpenAI format tool_calls array
+              const oaiToolCalls = inner?.tool_calls || ev?.tool_calls;
+              if (Array.isArray(oaiToolCalls)) {
+                for (const tc of oaiToolCalls) {
+                  const name = tc?.function?.name || tc?.name;
+                  if (name) {
+                    let input = tc?.function?.arguments ?? tc?.input;
+                    if (typeof input === 'string') {
+                      try { input = JSON.parse(input); } catch {}
+                    }
+                    const callId = String(tc?.id || '');
+                    if (!tr.latestToolName) {
+                      tr.latestToolName = name;
+                      tr.latestToolInput = input;
+                    }
+                    const isAnswered = (callId && tr.answeredToolIds.has(callId)) || tr.hasRecentResult || tr.hasRecentAssistantMessage;
+                    if (!isAnswered && !tr.pendingToolName) {
+                      tr.pendingToolName = name;
+                      tr.pendingToolInput = input;
+                    }
+                  }
+                }
+              }
 
-              if (!toolName && !activityText) continue;
+              // Plain text fallback
+              if (!tr.latestText) {
+                const plain = typeof inner?.text === 'string' ? inner.text : typeof ev?.text === 'string' ? ev.text : undefined;
+                if (plain && plain.trim()) {
+                  tr.latestText = plain.trim().slice(0, 80);
+                  if (role === 'assistant') tr.hasRecentAssistantMessage = true;
+                }
+              }
+            }
 
+            // Apply extracted state to sessions
+            for (const [sk, tr] of trackers.entries()) {
               const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
               if (!session) continue;
 
-              enriched.add(sk);
-              if (toolName) {
-                session.lastToolName = toolName;
-                session.lastToolInput = toolInput;
-              } else if (activityText) {
-                session.lastActivityText = activityText;
+              if (tr.pendingToolName) {
+                session.lastToolName = tr.pendingToolName;
+                session.lastToolInput = tr.pendingToolInput;
+                session.isToolPending = true;
+              } else {
+                session.isToolPending = false;
+                if (tr.latestToolName) {
+                  session.lastToolName = tr.latestToolName;
+                  session.lastToolInput = tr.latestToolInput;
+                }
+                if (tr.latestText) {
+                  session.lastActivityText = tr.latestText;
+                }
               }
             }
           }

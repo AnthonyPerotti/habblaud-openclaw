@@ -16,6 +16,31 @@ import { tr } from '../../shared/i18n';
 export const DEFAULT_DELIVERY_TIMEOUT_MS = 15_000;
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2_500;
 
+/**
+ * Resolves the default gateway IP inside a Linux/Docker container via /proc/net/route.
+ */
+export function getContainerDefaultGateway(): string | undefined {
+  try {
+    if (existsSync('/proc/net/route')) {
+      const route = readFileSync('/proc/net/route', 'utf8');
+      for (const line of route.split('\n')) {
+        const parts = line.trim().split(/\s+/);
+        if (parts[1] === '00000000' && parts[2]) {
+          const hex = parts[2];
+          const b1 = parseInt(hex.substring(6, 8), 16);
+          const b2 = parseInt(hex.substring(4, 6), 16);
+          const b3 = parseInt(hex.substring(2, 4), 16);
+          const b4 = parseInt(hex.substring(0, 2), 16);
+          return `${b4}.${b3}.${b2}.${b1}`;
+        }
+      }
+    }
+  } catch {
+    // Ignore read failure
+  }
+  return undefined;
+}
+
 export interface OpenClawDeliveryJob {
   /** Full session key, e.g. "agent:main:dashboard:e98cd445-e9ca-47ea-92a9-4d4ce8a22468" */
   sessionKey: string;
@@ -129,25 +154,24 @@ export class OpenClawGatewayClient {
       if (this.token) {
         headers.Authorization = `Bearer ${this.token}`;
       }
-      const res = await this._fetch(`${httpUrl}/v1/models`, {
-        method: 'GET',
-        headers,
-        signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS),
-      }).catch(async () => {
-        return this._fetch(`${httpUrl}/api/health`, {
-          method: 'GET',
-          headers,
-          signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS),
-        });
-      }).catch(async () => {
-        return this._fetch(`${httpUrl}/`, {
-          method: 'GET',
-          headers,
-          signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS),
-        });
-      });
 
-      return res.status < 500 || res.status === 401 || res.status === 403;
+      const endpoints = ['/api/sessions', '/v1/models', '/api/health', '/'];
+      for (const ep of endpoints) {
+        try {
+          const res = await this._fetch(`${httpUrl}${ep}`, {
+            method: 'GET',
+            headers,
+            signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS),
+          });
+          // Any HTTP response status (including 200, 401, 403, 404) proves server is reachable
+          if (typeof res?.status === 'number' && res.status > 0) {
+            return true;
+          }
+        } catch {
+          // try next endpoint
+        }
+      }
+      return false;
     } catch {
       return false;
     }
@@ -174,14 +198,19 @@ export class OpenClawGatewayClient {
         return true;
       }
 
-      // 2. Candidate fallbacks (docker bridge host, docker internal, localhost)
+      // 2. Candidate fallbacks (auto-detected docker bridge gateway, docker internal, localhost)
+      const gwIp = getContainerDefaultGateway();
       const candidates = [
         this.gatewayUrl,
-        'http://172.17.0.1:18789',
+        gwIp ? `http://${gwIp}:18789` : '',
         'http://host.docker.internal:18789',
+        'http://172.17.0.1:18789',
+        'http://172.18.0.1:18789',
+        'http://172.19.0.1:18789',
+        'http://172.20.0.1:18789',
         'http://127.0.0.1:18789',
         'http://openclaw:18789',
-      ].filter((u) => u !== this.activeGatewayUrl);
+      ].filter((u): u is string => Boolean(u && u !== this.activeGatewayUrl));
 
       for (const candidate of candidates) {
         if (await this.probeUrl(candidate)) {

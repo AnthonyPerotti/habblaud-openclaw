@@ -320,15 +320,18 @@ export class OpenClawSource implements AgentSource {
       // Manage persistent waiting state (AskUserQuestion, confirmation, permission)
       if (s.status === 'done' || s.status === 'failed') {
         this.pendingWaiting.delete(s.key);
-      } else if (s.lastToolName && !isWaitingTool(s.lastToolName)) {
+      } else if (s.isToolPending === false) {
+        // The tool was answered, executed, or superseded by subsequent turns
         this.pendingWaiting.delete(s.key);
-      } else if (isWaitingTool(s.lastToolName)) {
+      } else if (s.isToolPending && isWaitingTool(s.lastToolName)) {
         this.pendingWaiting.set(s.key, {
           toolName: s.lastToolName!,
           input: s.lastToolInput,
           reason: extractWaitingReason(s.lastToolInput),
           at: lastAt,
         });
+      } else if (s.lastToolName && !isWaitingTool(s.lastToolName)) {
+        this.pendingWaiting.delete(s.key);
       }
 
       const pendingWait = this.pendingWaiting.get(s.key);
@@ -337,7 +340,7 @@ export class OpenClawSource implements AgentSource {
         s.lastToolInput = pendingWait.input;
       }
 
-      const isWaiting = s.status === 'waiting' || !!pendingWait || (isWaitingTool(s.lastToolName) && s.status !== 'failed');
+      const isWaiting = s.status === 'waiting' || (s.isToolPending && isWaitingTool(s.lastToolName)) || !!pendingWait;
       const waitingReason = isWaiting ? (pendingWait?.reason ?? extractWaitingReason(s.lastToolInput)) : undefined;
 
       let status: AgentStatus = 'idle';
