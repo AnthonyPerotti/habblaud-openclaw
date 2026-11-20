@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AccountsService } from '../../accounts/service';
 import { NameStore } from '../../model/names';
 import { Office } from '../../model/office';
@@ -123,6 +123,102 @@ describe('OpenClawSource full sync test', () => {
 
     source.stop();
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe('OpenClawSource scheduleSync throttling & single-flight', () => {
+  const tmpDir = join(process.cwd(), 'dist', 'test-openclaw-throttling');
+
+  function createTestSource(): OpenClawSource {
+    const names = new NameStore(join(tmpDir, 'names.json'));
+    const accounts = new AccountsService({ dirs: [], home: tmpDir, env: {}, onChange: () => {} });
+    const office = new Office({
+      names,
+      roomAlias: () => undefined,
+      version: '1.0.3',
+      startedAt: Date.now(),
+      accounts: () => [],
+      sources: () => [],
+      accountName: () => 'OpenClaw',
+      terminal: true,
+      permissions: () => new Map(),
+      ptys: () => ({ status: { enabled: false, reason: 'test' }, list: [] }),
+      updates: () => ({ state: 'off', available: false }),
+      world: () => ({ enabled: false, configured: false, state: 'off' }),
+    });
+    return new OpenClawSource({
+      openclawHome: tmpDir,
+      accounts,
+      office,
+      pollIntervalMs: 5000,
+    });
+  }
+
+  it('coalesces N rapid watcher events into a single sync call with 500ms debounce', async () => {
+    vi.useFakeTimers();
+    try {
+      const source = createTestSource();
+      const syncSpy = vi.spyOn(source, 'syncSessions').mockImplementation(async () => {});
+
+      // Fire 10 rapid scheduleSync calls (simulating flood of file watcher events)
+      for (let i = 0; i < 10; i++) {
+        source.scheduleSync();
+      }
+
+      // After 250ms, debounce should not have fired yet
+      await vi.advanceTimersByTimeAsync(250);
+      expect(syncSpy).not.toHaveBeenCalled();
+
+      // After full 500ms trailing delay, exactly 1 sync should execute
+      await vi.advanceTimersByTimeAsync(300);
+      expect(syncSpy).toHaveBeenCalledTimes(1);
+
+      source.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('prevents concurrent executions via single-flight and reruns once if dirty', async () => {
+    const source = createTestSource();
+
+    let concurrentRunning = 0;
+    let maxConcurrent = 0;
+    let callCount = 0;
+
+    let resolveFirst: (() => void) | null = null;
+    const firstPromise = new Promise<void>((r) => { resolveFirst = r; });
+
+    vi.spyOn(source, 'syncSessions').mockImplementation(async () => {
+      callCount++;
+      concurrentRunning++;
+      if (concurrentRunning > maxConcurrent) maxConcurrent = concurrentRunning;
+
+      if (callCount === 1) {
+        await firstPromise;
+      }
+      concurrentRunning--;
+    });
+
+    // Launch first sync execution
+    const run1 = (source as any).runSyncSingleFlight();
+
+    // While first is in-flight, trigger a second and third sync call
+    const run2 = (source as any).runSyncSingleFlight();
+    const run3 = (source as any).runSyncSingleFlight();
+
+    expect(maxConcurrent).toBe(1);
+    expect(callCount).toBe(1);
+
+    // Resolve first sync execution
+    resolveFirst!();
+    await Promise.all([run1, run2, run3]);
+
+    // Maximum concurrent was 1 (strict single-flight) and reran once for dirty = total 2
+    expect(maxConcurrent).toBe(1);
+    expect(callCount).toBe(2);
+
+    source.stop();
   });
 });
 

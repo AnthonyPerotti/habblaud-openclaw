@@ -1,13 +1,53 @@
 // Reader for OpenClaw session SQLite database and state files.
 import { createRequire } from 'node:module';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { gunzipSync, inflateSync } from 'node:zlib';
 import type { OpenClawSession, OpenClawSessionsPayload } from './types';
-import { log } from '../../log';
+import { errMsg, log } from '../../log';
 
 // Tracks the last error state per db path for transition logging (ok→error, error→ok).
 const dbErrorState = new Map<string, { msg: string; at: number }>();
+
+// Cache for unchanged databases: mtime + size per DB file (Fix 7)
+interface DbFileCacheEntry {
+  mtimeMs: number;
+  size: number;
+  walMtimeMs?: number;
+  walSize?: number;
+  result: { sessions: OpenClawSession[]; ok: boolean; error?: string; mode?: string };
+}
+const dbFileCache = new Map<string, DbFileCacheEntry>();
+
+// Backoff state for databases failing repeatedly (Fix 8: 3s → 6s → 12s → 30s → 60s)
+interface DbBackoffEntry {
+  consecutiveErrors: number;
+  nextAttemptAt: number;
+}
+const dbBackoffState = new Map<string, DbBackoffEntry>();
+const BACKOFF_DELAYS = [3_000, 6_000, 12_000, 30_000, 60_000];
+
+// Incremental transcript enrichment state per db path (Fix 4)
+interface TranscriptEnrichmentState {
+  lastRowId: number;
+  sessionState: Map<string, {
+    pendingToolName?: string;
+    pendingToolInput?: unknown;
+    latestToolName?: string;
+    latestToolInput?: unknown;
+    latestText?: string;
+    isToolPending: boolean;
+  }>;
+}
+const dbTranscriptCaches = new Map<string, TranscriptEnrichmentState>();
+
+export function _clearDbCachesForTest(): void {
+  dbFileCache.clear();
+  dbBackoffState.clear();
+  dbTranscriptCaches.clear();
+  dbErrorState.clear();
+}
 
 let cachedDatabaseSync: any = null;
 let sqliteCheckDone = false;
@@ -42,36 +82,54 @@ export async function getDatabaseSyncClass(): Promise<any> {
   return cachedDatabaseSync;
 }
 
-/** Temp dir used for WAL snapshot copies (P1-2). Created once per process. */
+/** Temp dir used for WAL snapshot copies (Fix 2). Created once per process in tmpdir. */
 let walTempDir: string | null = null;
-function getWalTempDir(): string {
+let walTempDirUnavailable = false;
+
+export function getWalTempDir(): string | null {
+  if (walTempDirUnavailable) return null;
   if (walTempDir) return walTempDir;
-  const base = join(resolve('.'), 'dist', 'habblaud-wal-tmp');
+
+  const baseDir = process.env.HABBLAUD_TMP_DIR?.trim() || tmpdir();
+  const dir = join(baseDir, 'habblaud-wal-tmp');
   try {
-    mkdirSync(base, { recursive: true });
-  } catch {
-    // ignore; if it fails we fall back to immutable mode
+    mkdirSync(dir, { recursive: true });
+    walTempDir = dir;
+    return dir;
+  } catch (err) {
+    if (!walTempDirUnavailable) {
+      walTempDirUnavailable = true;
+      log.warn(`[OpenClaw] Diretório temporário WAL indisponível em ${dir}: ${errMsg(err)}`);
+    }
+    return null;
   }
-  walTempDir = base;
-  return base;
+}
+
+export function _resetWalTempDirForTest(): void {
+  walTempDir = null;
+  walTempDirUnavailable = false;
 }
 
 /**
  * Opens a read-only SQLite database, handling WAL + read-only bind mounts (:ro).
  *
- * Strategy (P1-2):
- *   1. Try normal readOnly open.
- *   2. If that fails and a -wal file exists that is newer than the .sqlite, copy the
- *      trio (db, -wal, -shm) to a temp dir and open the copy in readOnly mode — this
- *      preserves uncommitted WAL pages that `immutable=1` would silently skip.
+ * Strategy:
+ *   1. Try normal readOnly open and validate handle with a real query.
+ *   2. If that fails and a -wal file exists, copy the trio (db, -wal, -shm) to a temp
+ *      dir and open the copy in readOnly mode — this preserves uncommitted WAL pages.
  *   3. Last resort: open with `?immutable=1`, which ignores WAL but at least reads the
- *      last checkpoint. Logs which mode was used so it's visible in Portainer.
+ *      last checkpoint. Logs a warning that recent events might be missing.
  */
 export function openDatabase(DatabaseClass: any, dbPath: string): { db: any; mode: 'normal' | 'wal-copy' | 'immutable' } {
-  // Attempt 1: normal read-only open
+  // Attempt 1: normal read-only open (Fix 1: validate handle with a real query)
   try {
     const db = new DatabaseClass(dbPath, { readOnly: true });
-    return { db, mode: 'normal' };
+    try {
+      db.prepare('SELECT count(*) FROM sqlite_master').get();
+      return { db, mode: 'normal' };
+    } catch {
+      try { db.close(); } catch { /* ignore */ }
+    }
   } catch {
     // falls through to WAL copy or immutable
   }
@@ -81,13 +139,11 @@ export function openDatabase(DatabaseClass: any, dbPath: string): { db: any; mod
   const shmPath = `${dbPath}-shm`;
   const walExists = existsSync(walPath);
 
-  // Attempt 2: if -wal exists and is newer, copy the trio and open the copy
+  // Attempt 2: if -wal exists, copy trio to writable temp directory (Fix 2 & 3)
   if (walExists) {
-    try {
-      const dbStat = statSync(dbPath);
-      const walStat = statSync(walPath);
-      if (walStat.mtimeMs > dbStat.mtimeMs) {
-        const tmpDir = getWalTempDir();
+    const tmpDir = getWalTempDir();
+    if (tmpDir) {
+      try {
         const stem = basename(dbPath);
         const tmpDb = join(tmpDir, stem);
         copyFileSync(dbPath, tmpDb);
@@ -96,14 +152,20 @@ export function openDatabase(DatabaseClass: any, dbPath: string): { db: any; mod
           try { copyFileSync(shmPath, `${tmpDb}-shm`); } catch { /* shm absent is fine */ }
         }
         const db = new DatabaseClass(tmpDb, { readOnly: true });
-        return { db, mode: 'wal-copy' };
+        try {
+          db.prepare('SELECT count(*) FROM sqlite_master').get();
+          return { db, mode: 'wal-copy' };
+        } catch {
+          try { db.close(); } catch { /* ignore */ }
+        }
+      } catch {
+        // copy or open failed; fall through to immutable
       }
-    } catch {
-      // copy or open failed; fall through to immutable
     }
   }
 
   // Attempt 3: immutable=1 (ignores WAL, reads last checkpoint)
+  log.warn(`[OpenClaw] Banco ${dbPath} aberto em modo immutable: eventos recentes podem faltar`);
   const uri = `file:${absPath}?immutable=1`;
   const db = new DatabaseClass(uri, { readOnly: true });
   return { db, mode: 'immutable' };
@@ -180,6 +242,25 @@ export function findOpenClawDatabases(openclawHome: string): string[] {
   return Array.from(dbs);
 }
 
+function getDbFileStats(dbPath: string): { mtimeMs: number; size: number; walMtimeMs?: number; walSize?: number } | null {
+  try {
+    const st = statSync(dbPath);
+    const walPath = `${dbPath}-wal`;
+    let walMtimeMs: number | undefined;
+    let walSize: number | undefined;
+    if (existsSync(walPath)) {
+      try {
+        const wst = statSync(walPath);
+        walMtimeMs = wst.mtimeMs;
+        walSize = wst.size;
+      } catch { /* ignore */ }
+    }
+    return { mtimeMs: st.mtimeMs, size: st.size, walMtimeMs, walSize };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Reads sessions from an OpenClaw SQLite database.
  * Supports:
@@ -196,6 +277,30 @@ export function findOpenClawDatabases(openclawHome: string): string[] {
 export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: OpenClawSession[]; ok: boolean; error?: string; mode?: string }> {
   const DatabaseClass = await getDatabaseSyncClass();
   if (!DatabaseClass) return { sessions: [], ok: false, error: 'node:sqlite unavailable' };
+
+  // Fix 8: Backoff check for consecutive errors
+  const now = Date.now();
+  const backoff = dbBackoffState.get(dbPath);
+  if (backoff && now < backoff.nextAttemptAt) {
+    const cached = dbFileCache.get(dbPath);
+    if (cached) return cached.result;
+    return { sessions: [], ok: false, error: 'Database in backoff cooldown' };
+  }
+
+  // Fix 7: Skip unchanged databases by comparing mtimeMs and size
+  const stats = getDbFileStats(dbPath);
+  if (stats) {
+    const cached = dbFileCache.get(dbPath);
+    if (
+      cached &&
+      cached.mtimeMs === stats.mtimeMs &&
+      cached.size === stats.size &&
+      cached.walMtimeMs === stats.walMtimeMs &&
+      cached.walSize === stats.walSize
+    ) {
+      return cached.result;
+    }
+  }
 
   let db: any = null;
   let mode: string = 'normal';
@@ -324,153 +429,176 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
 
         allSessions.push(...sessionMap.values());
 
-        // Fast transcript enrichment for speech bubbles and waiting/intervention detection.
-        // Uses native SQLite rowid ordering (O(1) B-tree lookup, zero sorting, zero table scan).
-        // Reads at most 60 recent rows to catch active tool calls across multiple concurrent sessions.
+        // Fast incremental transcript enrichment (Fix 4).
+        // Uses native SQLite rowid ordering without SELECT *.
+        // Reads only rows with rowid > lastRowId (at most 60 recent rows).
         try {
           if (tableNames.has('transcript_events')) {
+            let tCache = dbTranscriptCaches.get(dbPath);
+            if (!tCache) {
+              tCache = { lastRowId: 0, sessionState: new Map() };
+              dbTranscriptCaches.set(dbPath, tCache);
+            }
+
             const recentRows = db
-              .prepare(`SELECT * FROM transcript_events ORDER BY rowid DESC LIMIT 60`)
-              .all() as Array<Record<string, unknown>>;
+              .prepare(`SELECT rowid, session_key, entry_json FROM transcript_events WHERE rowid > ? ORDER BY rowid DESC LIMIT 60`)
+              .all(tCache.lastRowId) as Array<{ rowid: number | bigint; session_key: string; entry_json: unknown }>;
 
-            interface SessionTracker {
-              answeredToolIds: Set<string>;
-              hasRecentResult: boolean;
-              hasRecentAssistantMessage: boolean;
-              pendingToolName?: string;
-              pendingToolInput?: unknown;
-              latestToolName?: string;
-              latestToolInput?: unknown;
-              latestText?: string;
-            }
+            if (recentRows.length > 0) {
+              let maxRowId = tCache.lastRowId;
+              for (const r of recentRows) {
+                const rid = Number(r.rowid);
+                if (rid > maxRowId) maxRowId = rid;
+              }
+              tCache.lastRowId = maxRowId;
 
-            const trackers = new Map<string, SessionTracker>();
-
-            for (const row of recentRows) {
-              const sk = String(row.session_key || row.session_id || '');
-              if (!sk) continue;
-
-              const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
-              if (!session) continue;
-
-              let tr = trackers.get(sk);
-              if (!tr) {
-                tr = {
-                  answeredToolIds: new Set<string>(),
-                  hasRecentResult: false,
-                  hasRecentAssistantMessage: false,
-                };
-                trackers.set(sk, tr);
+              interface SessionTracker {
+                answeredToolIds: Set<string>;
+                hasRecentResult: boolean;
+                hasRecentAssistantMessage: boolean;
+                pendingToolName?: string;
+                pendingToolInput?: unknown;
+                latestToolName?: string;
+                latestToolInput?: unknown;
+                latestText?: string;
               }
 
-              const rawData = row.entry_json || row.payload || row.data || row.event_json || row.content;
-              const rawPayload = decompressPayload(rawData);
-              if (!rawPayload) continue;
+              const trackers = new Map<string, SessionTracker>();
 
-              let ev: any;
-              try { ev = JSON.parse(rawPayload); } catch { continue; }
+              for (const row of recentRows) {
+                const sk = String(row.session_key || '');
+                if (!sk) continue;
 
-              const inner = ev?.event ?? ev?.content ?? ev?.message ?? ev;
-              if (!inner) continue;
-
-              const role = ev?.role ?? inner?.role;
-
-              // Inspect blocks inside content arrays (Anthropic/OpenClaw standard format)
-              const blocks: any[] = Array.isArray(inner)
-                ? inner
-                : Array.isArray(inner?.content)
-                ? inner.content
-                : Array.isArray(ev?.content)
-                ? ev.content
-                : [inner];
-
-              for (const b of blocks) {
-                if (!b || typeof b !== 'object') continue;
-
-                // Tool result / user answer block
-                if (b.type === 'tool_result' || b.type === 'toolResult' || b.type === 'tool_response' || role === 'tool') {
-                  const resId = String(b.tool_use_id || b.toolUseId || b.id || '');
-                  if (resId) tr.answeredToolIds.add(resId);
-                  tr.hasRecentResult = true;
+                let tr = trackers.get(sk);
+                if (!tr) {
+                  tr = {
+                    answeredToolIds: new Set<string>(),
+                    hasRecentResult: false,
+                    hasRecentAssistantMessage: false,
+                  };
+                  trackers.set(sk, tr);
                 }
-                // Tool use / function call block
-                else if (b.type === 'tool_use' || b.type === 'toolCall' || b.type === 'tool_call') {
-                  const name = String(b.name || b.tool || b.toolName || '');
-                  const input = b.input ?? b.arguments;
-                  const callId = String(b.id || b.tool_use_id || '');
 
-                  if (name) {
-                    if (!tr.latestToolName) {
-                      tr.latestToolName = name;
-                      tr.latestToolInput = input;
+                const rawData = row.entry_json;
+                const rawPayload = decompressPayload(rawData);
+                if (!rawPayload) continue;
+
+                let ev: any;
+                try { ev = JSON.parse(rawPayload); } catch { continue; }
+
+                const inner = ev?.event ?? ev?.content ?? ev?.message ?? ev;
+                if (!inner) continue;
+
+                const role = ev?.role ?? inner?.role;
+
+                // Inspect blocks inside content arrays (Anthropic/OpenClaw standard format)
+                const blocks: any[] = Array.isArray(inner)
+                  ? inner
+                  : Array.isArray(inner?.content)
+                  ? inner.content
+                  : Array.isArray(ev?.content)
+                  ? ev.content
+                  : [inner];
+
+                for (const b of blocks) {
+                  if (!b || typeof b !== 'object') continue;
+
+                  // Tool result / user answer block
+                  if (b.type === 'tool_result' || b.type === 'toolResult' || b.type === 'tool_response' || role === 'tool') {
+                    const resId = String(b.tool_use_id || b.toolUseId || b.id || '');
+                    if (resId) tr.answeredToolIds.add(resId);
+                    tr.hasRecentResult = true;
+                  }
+                  // Tool use / function call block
+                  else if (b.type === 'tool_use' || b.type === 'toolCall' || b.type === 'tool_call') {
+                    const name = String(b.name || b.tool || b.toolName || '');
+                    const input = b.input ?? b.arguments;
+                    const callId = String(b.id || b.tool_use_id || '');
+
+                    if (name) {
+                      if (!tr.latestToolName) {
+                        tr.latestToolName = name;
+                        tr.latestToolInput = input;
+                      }
+
+                      // A tool is pending only if no tool_result or subsequent assistant turn was seen above it
+                      const isAnswered = (callId && tr.answeredToolIds.has(callId)) || tr.hasRecentResult || tr.hasRecentAssistantMessage;
+                      if (!isAnswered && !tr.pendingToolName) {
+                        tr.pendingToolName = name;
+                        tr.pendingToolInput = input;
+                      }
                     }
+                  }
+                  // Assistant text / thought
+                  else if (typeof b.text === 'string' && b.text.trim()) {
+                    if (!tr.latestText) tr.latestText = b.text.trim().slice(0, 80);
+                    if (role === 'assistant') tr.hasRecentAssistantMessage = true;
+                  }
+                }
 
-                    // A tool is pending only if no tool_result or subsequent assistant turn was seen above it
-                    const isAnswered = (callId && tr.answeredToolIds.has(callId)) || tr.hasRecentResult || tr.hasRecentAssistantMessage;
-                    if (!isAnswered && !tr.pendingToolName) {
-                      tr.pendingToolName = name;
-                      tr.pendingToolInput = input;
+                // Also check OpenAI format tool_calls array
+                const oaiToolCalls = inner?.tool_calls || ev?.tool_calls;
+                if (Array.isArray(oaiToolCalls)) {
+                  for (const tc of oaiToolCalls) {
+                    const name = tc?.function?.name || tc?.name;
+                    if (name) {
+                      let input = tc?.function?.arguments ?? tc?.input;
+                      if (typeof input === 'string') {
+                        try { input = JSON.parse(input); } catch {}
+                      }
+                      const callId = String(tc?.id || '');
+                      if (!tr.latestToolName) {
+                        tr.latestToolName = name;
+                        tr.latestToolInput = input;
+                      }
+                      const isAnswered = (callId && tr.answeredToolIds.has(callId)) || tr.hasRecentResult || tr.hasRecentAssistantMessage;
+                      if (!isAnswered && !tr.pendingToolName) {
+                        tr.pendingToolName = name;
+                        tr.pendingToolInput = input;
+                      }
                     }
                   }
                 }
-                // Assistant text / thought
-                else if (typeof b.text === 'string' && b.text.trim()) {
-                  if (!tr.latestText) tr.latestText = b.text.trim().slice(0, 80);
-                  if (role === 'assistant') tr.hasRecentAssistantMessage = true;
-                }
-              }
 
-              // Also check OpenAI format tool_calls array
-              const oaiToolCalls = inner?.tool_calls || ev?.tool_calls;
-              if (Array.isArray(oaiToolCalls)) {
-                for (const tc of oaiToolCalls) {
-                  const name = tc?.function?.name || tc?.name;
-                  if (name) {
-                    let input = tc?.function?.arguments ?? tc?.input;
-                    if (typeof input === 'string') {
-                      try { input = JSON.parse(input); } catch {}
-                    }
-                    const callId = String(tc?.id || '');
-                    if (!tr.latestToolName) {
-                      tr.latestToolName = name;
-                      tr.latestToolInput = input;
-                    }
-                    const isAnswered = (callId && tr.answeredToolIds.has(callId)) || tr.hasRecentResult || tr.hasRecentAssistantMessage;
-                    if (!isAnswered && !tr.pendingToolName) {
-                      tr.pendingToolName = name;
-                      tr.pendingToolInput = input;
-                    }
+                // Plain text fallback
+                if (!tr.latestText) {
+                  const plain = typeof inner?.text === 'string' ? inner.text : typeof ev?.text === 'string' ? ev.text : undefined;
+                  if (plain && plain.trim()) {
+                    tr.latestText = plain.trim().slice(0, 80);
+                    if (role === 'assistant') tr.hasRecentAssistantMessage = true;
                   }
                 }
               }
 
-              // Plain text fallback
-              if (!tr.latestText) {
-                const plain = typeof inner?.text === 'string' ? inner.text : typeof ev?.text === 'string' ? ev.text : undefined;
-                if (plain && plain.trim()) {
-                  tr.latestText = plain.trim().slice(0, 80);
-                  if (role === 'assistant') tr.hasRecentAssistantMessage = true;
-                }
+              for (const [sk, tr] of trackers.entries()) {
+                tCache.sessionState.set(sk, {
+                  pendingToolName: tr.pendingToolName,
+                  pendingToolInput: tr.pendingToolInput,
+                  latestToolName: tr.latestToolName,
+                  latestToolInput: tr.latestToolInput,
+                  latestText: tr.latestText,
+                  isToolPending: Boolean(tr.pendingToolName),
+                });
               }
             }
 
-            // Apply extracted state to sessions
-            for (const [sk, tr] of trackers.entries()) {
+            // Apply extracted state to sessions (reused when no new rows)
+            for (const [sk, sState] of tCache.sessionState.entries()) {
               const session = sessionMap.get(sk) ?? [...sessionMap.values()].find((s) => s.key === sk);
               if (!session) continue;
 
-              if (tr.pendingToolName) {
-                session.lastToolName = tr.pendingToolName;
-                session.lastToolInput = tr.pendingToolInput;
+              if (sState.isToolPending) {
+                session.lastToolName = sState.pendingToolName;
+                session.lastToolInput = sState.pendingToolInput;
                 session.isToolPending = true;
               } else {
                 session.isToolPending = false;
-                if (tr.latestToolName) {
-                  session.lastToolName = tr.latestToolName;
-                  session.lastToolInput = tr.latestToolInput;
+                if (sState.latestToolName) {
+                  session.lastToolName = sState.latestToolName;
+                  session.lastToolInput = sState.latestToolInput;
                 }
-                if (tr.latestText) {
-                  session.lastActivityText = tr.latestText;
+                if (sState.latestText) {
+                  session.lastActivityText = sState.latestText;
                 }
               }
             }
@@ -549,19 +677,42 @@ export async function readSessionsFromDb(dbPath: string): Promise<{ sessions: Op
       }
     }
 
+    // Reset backoff on success (Fix 8)
+    dbBackoffState.delete(dbPath);
+
     // Clear error state on success (P1-1 transition logging).
     const prev = dbErrorState.get(dbPath);
     if (prev) {
-      log.info(`[OpenClaw] Database ${dbPath} is readable again (was: ${prev.msg})`);
+      log.info(`[OpenClaw] Database ${dbPath} is readable again (was: ${prev.msg}) [mode: ${mode}]`);
       dbErrorState.delete(dbPath);
     }
 
-    return { sessions: allSessions, ok: true, mode };
+    const finalResult = { sessions: allSessions, ok: true, mode };
+    if (stats) {
+      dbFileCache.set(dbPath, {
+        mtimeMs: stats.mtimeMs,
+        size: stats.size,
+        walMtimeMs: stats.walMtimeMs,
+        walSize: stats.walSize,
+        result: finalResult,
+      });
+    }
+
+    return finalResult;
   } catch (err) {
     const msg = String(err).slice(0, 200);
+
+    // Increment consecutive errors and compute backoff interval (Fix 8: 3s → 6s → 12s → 30s → 60s)
+    const prevBackoff = dbBackoffState.get(dbPath);
+    const errCount = (prevBackoff?.consecutiveErrors ?? 0) + 1;
+    const delay = BACKOFF_DELAYS[Math.min(errCount - 1, BACKOFF_DELAYS.length - 1)];
+    dbBackoffState.set(dbPath, {
+      consecutiveErrors: errCount,
+      nextAttemptAt: now + delay,
+    });
+
     // Log transition ok→error and periodic reminders every 10 min (P1-1).
     const prev = dbErrorState.get(dbPath);
-    const now = Date.now();
     const REMIND_MS = 10 * 60_000;
     if (!prev) {
       log.warn(`[OpenClaw] Cannot read database ${dbPath}: ${msg}`);

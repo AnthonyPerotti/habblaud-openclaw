@@ -109,6 +109,9 @@ export class OpenClawSource implements AgentSource {
 
   private running = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private syncTimer: ReturnType<typeof setTimeout> | null = null;
+  private syncing = false;
+  private dirty = false;
   private watchers: FSWatcher[] = [];
   private knownSessions = new Map<string, OpenClawSession>();
   private activeAgentIds = new Set<string>();
@@ -119,6 +122,42 @@ export class OpenClawSource implements AgentSource {
 
   constructor(private readonly opts: OpenClawSourceOptions) {
     this.history = new OpenClawHistory(opts.openclawHome);
+  }
+
+  /**
+   * Schedules a session sync with a 500ms trailing debounce (Fix 5).
+   * Coalesces rapid filesystem events and poll ticks into a single flight.
+   */
+  scheduleSync(): void {
+    if (this.syncTimer) {
+      clearTimeout(this.syncTimer);
+    }
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      void this.runSyncSingleFlight();
+    }, 500);
+  }
+
+  /**
+   * Single-flight execution guarantee (Fix 5).
+   * If sync is already running, marks dirty and reruns once upon completion.
+   */
+  private async runSyncSingleFlight(): Promise<void> {
+    if (this.syncing) {
+      this.dirty = true;
+      return;
+    }
+    this.syncing = true;
+    try {
+      do {
+        this.dirty = false;
+        await this.syncSessions();
+      } while (this.dirty);
+    } catch (err) {
+      log.error(`OpenClaw sync error: ${errMsg(err)}`);
+    } finally {
+      this.syncing = false;
+    }
   }
 
   async start(): Promise<void> {
@@ -137,16 +176,19 @@ export class OpenClawSource implements AgentSource {
     // Set up filesystem watcher and polling fallback
     this.setupWatchers();
 
-    const interval = this.opts.pollIntervalMs ?? 3000;
+    const envPoll = process.env.HABBLAUD_POLL_MS ? Number(process.env.HABBLAUD_POLL_MS) : undefined;
+    const interval = this.opts.pollIntervalMs ?? (envPoll && !Number.isNaN(envPoll) ? envPoll : 3000);
     this.pollTimer = setInterval(() => {
-      this.syncSessions().catch((err) => {
-        log.warnOnce('openclaw-poll-error', `OpenClaw poll error: ${errMsg(err)}`);
-      });
+      this.scheduleSync();
     }, interval);
   }
 
   stop(): void {
     this.running = false;
+    if (this.syncTimer) {
+      clearTimeout(this.syncTimer);
+      this.syncTimer = null;
+    }
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -210,18 +252,40 @@ export class OpenClawSource implements AgentSource {
   }
 
   private setupWatchers(): void {
+    if (process.env.HABBLAUD_WATCH === '0') return;
     if (!existsSync(this.opts.openclawHome)) return;
 
-    try {
-      const w = watch(this.opts.openclawHome, { recursive: true }, () => {
-        this.syncSessions().catch(() => {});
-      });
-      w.on('error', (err) => {
-        log.warnOnce('openclaw-watcher-error', `OpenClaw filesystem watcher error: ${errMsg(err)}`);
-      });
-      this.watchers.push(w);
-    } catch {
-      // Recursive watch not supported on some platforms; pollTimer handles it
+    // Non-recursive watch restricted to agents and state folders (Fix 6)
+    const targets = [
+      join(this.opts.openclawHome, 'agents'),
+      join(this.opts.openclawHome, 'state'),
+    ];
+
+    for (const dir of targets) {
+      if (!existsSync(dir)) continue;
+      try {
+        const w = watch(dir, { recursive: false }, (_eventType, filename) => {
+          if (filename) {
+            const fn = String(filename);
+            if (
+              fn.endsWith('-wal') ||
+              fn.endsWith('-shm') ||
+              fn.endsWith('.log') ||
+              fn.includes('tmp') ||
+              fn.includes('codex-home')
+            ) {
+              return;
+            }
+          }
+          this.scheduleSync();
+        });
+        w.on('error', (err) => {
+          log.warnOnce('openclaw-watcher-error', `OpenClaw filesystem watcher error: ${errMsg(err)}`);
+        });
+        this.watchers.push(w);
+      } catch {
+        // Watcher failure on this directory is non-fatal; polling is source of truth
+      }
     }
   }
 

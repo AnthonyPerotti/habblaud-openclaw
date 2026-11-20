@@ -236,6 +236,8 @@ When accessing Habblaud through Nginx Proxy Manager, Traefik, or Caddy:
 | `HABBLAUD_TRUST_PROXY` | Enable terminal and messages when behind a trusted local reverse proxy or LAN setup | `1` |
 | `HABBLAUD_ALLOWED_HOSTS` | Accepted host headers (`*` allowed in Docker) | `*` in Docker, `localhost` outside |
 | `HABBLAUD_WORLD` | Enable Habblaud World community uplink | `0` |
+| `HABBLAUD_POLL_MS` | OpenClaw SQLite poll interval in milliseconds | `3000` |
+| `HABBLAUD_WATCH` | Enable filesystem watcher for OpenClaw state changes (`1` enabled, `0` disabled) | `1` |
 
 ## Troubleshooting and Operations
 

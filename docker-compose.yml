@@ -25,6 +25,10 @@ services:
       HABBLAUD_BIND: ${HABBLAUD_BIND:-0.0.0.0}
       HABBLAUD_TRUST_PROXY: ${HABBLAUD_TRUST_PROXY:-1}
       HABBLAUD_TERMINAL: ${HABBLAUD_TERMINAL:-1}
+      # Intervalo de polling SQLite do OpenClaw em ms (padrão 3000)
+      HABBLAUD_POLL_MS: ${HABBLAUD_POLL_MS:-3000}
+      # Observador do sistema de arquivos para o OpenClaw (1=ligado, 0=desligado)
+      HABBLAUD_WATCH: ${HABBLAUD_WATCH:-1}
       HABBLAUD_UPDATE_CHECK: 0
       HABBLAUD_LANG: ${HABBLAUD_LANG:-pt}
       HABBLAUD_WORLD: ${HABBLAUD_WORLD:-}

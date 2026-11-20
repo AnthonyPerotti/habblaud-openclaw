@@ -17,6 +17,17 @@ do meio (0.**3**.0).
 
 ### Corrigido
 
+- **[OpenClaw P-perf] Amplificação de leitura SQLite (112 GB em 71 min).**
+  - Consulta incremental `WHERE rowid > ?` e sem `SELECT *` na tabela `transcript_events`, reaproveitando o estado das ferramentas quando não há eventos novos.
+  - Cache de `mtimeMs` + `size` (incluindo `-wal`) para pular reabertura de bancos SQLite inalterados.
+  - Backoff exponencial em falhas consecutivas de leitura (3s → 6s → 12s → 30s → 60s), zerando no primeiro sucesso.
+  - Validação de handle no `openDatabase()` com leitura de teste real (`SELECT count(*) FROM sqlite_master`), garantindo que erros de lock/WAL no container `:ro` acionem os fallbacks (`wal-copy` e `immutable`) em vez de estourar no caller.
+  - `getWalTempDir()` alocado em `HABBLAUD_TMP_DIR` ou `os.tmpdir()` gravável, nunca em diretório interno do `/app` (read-only no Docker).
+  - Cópia do trio db/-wal/-shm sem condição invertida de `mtime`.
+  - `scheduleSync()` com debounce trailing de 500 ms e execução single-flight para evitar concorrência e sobreposição de chamadas.
+  - Watchers não recursivos restritos a `<home>/agents` e `<home>/state`, ignorando `-wal`, `-shm`, `*.log`, `tmp/` e `codex-home/`.
+  - Suporte e documentação das variáveis de ambiente `HABBLAUD_POLL_MS` e `HABBLAUD_WATCH`.
+
 - **[OpenClaw P0-1] Escritório vazio após atualização do OpenClaw 2026.11.x.** O schema da tabela
   `session_nodes` mudou: a coluna `id` foi removida, a PK passou a ser `session_key` e o id da
   sessão migrou para `current_session_id`. A query fixa `ORDER BY id DESC` estourava com

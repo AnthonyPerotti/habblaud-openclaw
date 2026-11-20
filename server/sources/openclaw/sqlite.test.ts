@@ -7,15 +7,14 @@
  *
  * These tests run only on Node.js >= 22 (node:sqlite availability).
  */
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { readSessionsFromDb } from './sqlite';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { openDatabase, readSessionsFromDb, _clearDbCachesForTest, _resetWalTempDirForTest } from './sqlite';
 import { AccountsService } from '../../accounts/service';
 import { NameStore } from '../../model/names';
 import { Office } from '../../model/office';
 import { OpenClawSource } from './source';
-import { writeFileSync } from 'node:fs';
 import type { OpenClawSession } from './types';
 
 // Skip all tests if node:sqlite is not available (Node < 22)
@@ -272,5 +271,149 @@ describe('Office.addSub — consistent character name across kind transitions (P
     expect(afterTransition?.name).toBe(nameBefore);
 
     source.stop();
+  });
+});
+
+describe('openDatabase & SQLite performance optimizations (P-perf)', () => {
+  const tmpDir = join(tmpBase, 'p-perf');
+
+  beforeAll(() => {
+    mkdirSync(tmpDir, { recursive: true });
+  });
+
+  afterAll(() => {
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    delete process.env.HABBLAUD_TMP_DIR;
+    _resetWalTempDirForTest();
+    _clearDbCachesForTest();
+  });
+
+  it('falls back to wal-copy and closes handle when normal mode prepare fails', () => {
+    const closedHandles: string[] = [];
+    const testDbPath = join(tmpDir, 'test-wal.sqlite');
+    writeFileSync(testDbPath, 'dummy db');
+    writeFileSync(`${testDbPath}-wal`, 'dummy wal');
+
+    class FakeDatabase {
+      path: string;
+      constructor(path: string) {
+        this.path = path;
+      }
+      prepare(query: string) {
+        if (this.path === testDbPath) {
+          // Normal mode fails query check
+          throw new Error('database is locked');
+        }
+        return {
+          get: () => ({ count: 1 }),
+        };
+      }
+      close() {
+        closedHandles.push(this.path);
+      }
+    }
+
+    const opened = openDatabase(FakeDatabase, testDbPath);
+    expect(opened.mode).toBe('wal-copy');
+    expect(closedHandles).toContain(testDbPath);
+  });
+
+  it('falls back to immutable mode when wal temp dir is not writable', () => {
+    process.env.HABBLAUD_TMP_DIR = 'Z:\\non_existent_drive_habblaud_1234';
+    _resetWalTempDirForTest();
+
+    const testDbPath = join(tmpDir, 'test-no-write.sqlite');
+    writeFileSync(testDbPath, 'dummy db');
+    writeFileSync(`${testDbPath}-wal`, 'dummy wal');
+
+    class FakeDatabase {
+      path: string;
+      constructor(path: string) {
+        this.path = path;
+      }
+      prepare() {
+        if (!this.path.includes('immutable=1')) {
+          throw new Error('read-only file system');
+        }
+        return { get: () => ({ count: 1 }) };
+      }
+      close() {}
+    }
+
+    const opened = openDatabase(FakeDatabase, testDbPath);
+    expect(opened.mode).toBe('immutable');
+
+    delete process.env.HABBLAUD_TMP_DIR;
+    _resetWalTempDirForTest();
+  });
+
+  it('skips reading DB file when mtime and size are unchanged', async () => {
+    if (!DatabaseSync) return;
+    _clearDbCachesForTest();
+
+    const dbPath = join(tmpDir, 'cache-test.sqlite');
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session_nodes (
+        session_key TEXT PRIMARY KEY,
+        current_session_id TEXT NOT NULL,
+        agent_id TEXT
+      );
+      INSERT INTO session_nodes VALUES ('agent:main:1', 'sid-1', 'main');
+    `);
+    db.close();
+
+    const first = await readSessionsFromDb(dbPath);
+    expect(first.ok).toBe(true);
+    expect(first.sessions).toHaveLength(1);
+
+    // Calling again returns cached result immediately without throwing or failing
+    const second = await readSessionsFromDb(dbPath);
+    expect(second.ok).toBe(true);
+    expect(second.sessions).toHaveLength(1);
+    expect(second.sessions[0].sessionId).toBe('sid-1');
+  });
+
+  it('reuses transcript enrichment state across syncs when no new rows arrive', async () => {
+    if (!DatabaseSync) return;
+    _clearDbCachesForTest();
+
+    const dbPath = join(tmpDir, 'incremental-transcript.sqlite');
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE session_nodes (
+        session_key TEXT PRIMARY KEY,
+        current_session_id TEXT NOT NULL,
+        agent_id TEXT,
+        status TEXT
+      );
+      CREATE TABLE transcript_events (
+        rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_key TEXT,
+        entry_json TEXT
+      );
+      INSERT INTO session_nodes VALUES ('agent:main:sess-1', 'sess-1', 'main', 'active');
+      INSERT INTO transcript_events (rowid, session_key, entry_json) VALUES (
+        1,
+        'agent:main:sess-1',
+        '{"event":{"type":"tool_use","name":"ask_user","input":{"question":"Qual o seu nome?"}}}'
+      );
+    `);
+    db.close();
+
+    const first = await readSessionsFromDb(dbPath);
+    expect(first.ok).toBe(true);
+    expect(first.sessions[0].lastToolName).toBe('ask_user');
+    expect(first.sessions[0].isToolPending).toBe(true);
+
+    // Touch mtime so readSessionsFromDb opens the DB again, but add NO rows to transcript_events
+    const nowSec = Math.floor(Date.now() / 1000) + 10;
+    utimesSync(dbPath, nowSec, nowSec);
+
+    const second = await readSessionsFromDb(dbPath);
+    expect(second.ok).toBe(true);
+    // Preserves the tool state extracted in the first pass
+    expect(second.sessions[0].lastToolName).toBe('ask_user');
+    expect(second.sessions[0].isToolPending).toBe(true);
   });
 });
