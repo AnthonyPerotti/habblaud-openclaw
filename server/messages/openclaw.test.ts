@@ -209,3 +209,49 @@ describe('MessageRegistry — OpenClaw canMessage without client plugin', () => 
     registry.stop();
   });
 });
+
+describe('OpenClawGatewayClient — o stream é a vida do turno', () => {
+  /**
+   * Regressão do bug de 2026-11-25: o cliente descartava a resposta assim que via o 2xx. O Gateway
+   * trata o socket como dono do turno, então o fechamento gerava `HTTP client disconnected` →
+   * `caller_signal_aborted` e o texto nunca entrava na conversa (o Habblaud dizia "entregue").
+   * Aqui o servidor falso só termina o turno depois de 300 ms e anota se o cliente o abandonou.
+   */
+  it('só responde depois do fim do stream e não fecha a conexão no meio', async () => {
+    let closedEarly = false;
+    let finishedAt = 0;
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8' });
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] })}\n\n`);
+        res.on('close', () => {
+          if (!finishedAt) closedEarly = true;
+        });
+        setTimeout(() => {
+          finishedAt = Date.now();
+          res.end('data: [DONE]\n\n');
+        }, 300);
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const port = (server.address() as any).port;
+    const client = new OpenClawGatewayClient({
+      gatewayUrl: `http://127.0.0.1:${port}`,
+      token: 'secret-token',
+      timeoutMs: 200,
+      bodyTimeoutMs: 5000,
+    });
+
+    const startedAt = Date.now();
+    const result = await client.deliver({ sessionKey: 'agent:main:dashboard:turn', text: 'tarefa longa' });
+    const elapsed = Date.now() - startedAt;
+
+    expect(result.ok).toBe(true);
+    expect(closedEarly).toBe(false);
+    expect(elapsed).toBeGreaterThanOrEqual(250);
+
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});

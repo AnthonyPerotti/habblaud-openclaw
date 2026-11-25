@@ -16,7 +16,7 @@ import {
   LOST_ERROR,
   messageText,
   OFFLINE_ERROR,
-  POLL_LIMIT_MS,
+  pollLimitMs,
   pollDelay,
   sendStatusText,
   timeoutError,
@@ -292,7 +292,8 @@ export class MessageComposer {
       if (m && (m.status !== cur.phase || m.error !== cur.error)) this.setState(agentId, { phase: m.status, id, error: m.error, at: now });
       if (m && isSettled(m.status)) return;
       const elapsed = now - since;
-      if (elapsed >= POLL_LIMIT_MS) return this.setState(agentId, { phase: 'failed', id, error: timeoutError(this.providers.get(agentId)), at: now });
+      if (elapsed >= pollLimitMs(this.providers.get(agentId)))
+        return this.setState(agentId, { phase: 'failed', id, error: timeoutError(this.providers.get(agentId)), at: now });
       setTimeout(() => void step(), pollDelay(elapsed));
     };
     setTimeout(() => void step(), pollDelay(0));

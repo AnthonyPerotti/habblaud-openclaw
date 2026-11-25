@@ -32,6 +32,11 @@ export const PRESENCE_MS = 10_000;
 export const QUEUED_TIMEOUT_MS = 60_000;
 /** Mensagem buscada que a sessão não confirmou neste tempo: falha. */
 export const SENT_TIMEOUT_MS = 30_000;
+/**
+ * Mensagem ao OpenClaw: a entrega dura o turno inteiro (o Gateway cancela o run se o socket fechar),
+ * então o prazo de confirmação é o do turno, não o do plugin.
+ */
+export const OPENCLAW_TIMEOUT_MS = 30 * 60_000;
 /** Mensagem resolvida (entregue ou não) fica este tempo para GET /api/messages/:id e depois some. */
 export const KEEP_MS = 10 * 60_000;
 /** Entrega fictícia de uma mensagem a um agente do demo. */
@@ -101,6 +106,8 @@ export interface MessageRegistryOptions {
   presenceMs?: number;
   queuedTimeoutMs?: number;
   sentTimeoutMs?: number;
+  /** Prazo de confirmação das mensagens ao OpenClaw (padrão: 30 min, o do turno). */
+  openclawTimeoutMs?: number;
   keepMs?: number;
   demoDeliveryMs?: number;
 }
@@ -212,6 +219,7 @@ export class MessageRegistry {
   private readonly presenceMs: number;
   private readonly queuedTimeoutMs: number;
   private readonly sentTimeoutMs: number;
+  private readonly openclawTimeoutMs: number;
   private readonly keepMs: number;
   private readonly demoDeliveryMs: number;
 
@@ -220,6 +228,7 @@ export class MessageRegistry {
     this.presenceMs = opts.presenceMs ?? PRESENCE_MS;
     this.queuedTimeoutMs = opts.queuedTimeoutMs ?? QUEUED_TIMEOUT_MS;
     this.sentTimeoutMs = opts.sentTimeoutMs ?? SENT_TIMEOUT_MS;
+    this.openclawTimeoutMs = opts.openclawTimeoutMs ?? OPENCLAW_TIMEOUT_MS;
     this.keepMs = opts.keepMs ?? KEEP_MS;
     this.demoDeliveryMs = opts.demoDeliveryMs ?? DEMO_DELIVERY_MS;
   }
@@ -450,7 +459,10 @@ export class MessageRegistry {
             ? ERR_CODEX_SLOW
             : ERR_CODEX_NOT_FETCHED,
         );
-      } else if (e.msg.status === 'sent' && now - (e.sentAt ?? now) >= this.sentTimeoutMs) {
+      } else if (
+        e.msg.status === 'sent' &&
+        now - (e.sentAt ?? now) >= (e.openclaw ? this.openclawTimeoutMs : this.sentTimeoutMs)
+      ) {
         this.fail(e, now, e.openclaw ? ERR_OPENCLAW_NOT_CONFIRMED : e.codex ? ERR_CODEX_NOT_CONFIRMED : ERR_NOT_CONFIRMED);
         e.late = true;
       }

@@ -10,7 +10,7 @@
 // 3. Exports the entries to a temporary JSONL file in `dist/transcripts/`.
 // 4. `transcriptPathOf(agentId)` returns the path to this JSONL file.
 // 5. `createOpenClawTerminalParser()` parses each line into a `TerminalEntry`.
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { maskSecrets, truncate } from '../../../shared/activity';
@@ -51,8 +51,8 @@ function getTranscriptsDir(): string {
   );
 }
 
-/** Cache tracking exported event IDs per session file to append efficiently */
-const sessionExportState = new Map<string, { lastId: number | string; count: number }>();
+/** Cache tracking exported rows per session file to append efficiently */
+const sessionExportState = new Map<string, { lastSeq: number; count: number; sessionId?: string }>();
 
 function sanitizeSessionKey(key: string): string {
   return key.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
@@ -322,7 +322,14 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
   const safeName = sanitizeSessionKey(opts.sessionKey || `session_${hash32(opts.sessionKey)}`);
   const jsonlPath = join(outDir, `openclaw-${safeName}.jsonl`);
 
+  // A sessão pode trocar de id (/clear, /resume, compactação). O `sessionId` do snapshot fica velho e
+  // o terminal passaria a mostrar só a conversa antiga — então o id é relido do banco a cada sync.
+  let sessionId = opts.sessionId;
+
   let rows: Array<Record<string, unknown>> = [];
+  /** Último `seq` lido: só as linhas novas são acrescentadas ao JSONL. */
+  let lastSeq = 0;
+  let incremental = false;
 
   for (const dbPath of candidates) {
     if (!existsSync(dbPath)) continue;
@@ -334,6 +341,18 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
       const tableNames = new Set(tables.map((t) => t.name));
 
       if (tableNames.has('transcript_events')) {
+        // Id atual da sessão: `session_nodes.current_session_id` para a chave pedida.
+        if (tableNames.has('session_nodes') && opts.sessionKey) {
+          try {
+            const node = db
+              .prepare('SELECT current_session_id FROM session_nodes WHERE session_key = ?')
+              .get(opts.sessionKey) as { current_session_id?: string } | undefined;
+            if (node?.current_session_id) sessionId = node.current_session_id;
+          } catch {
+            // schema antigo: mantém o id do snapshot
+          }
+        }
+
         const cols = db.prepare('PRAGMA table_info(transcript_events)').all() as Array<{ name: string }>;
         const colSet = new Set(cols.map((c) => c.name));
 
@@ -344,9 +363,25 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
         if (colSet.has('session_key') && opts.sessionKey) {
           query += ` WHERE session_key = ?`;
           params.push(opts.sessionKey);
-        } else if (colSet.has('session_id') && opts.sessionId) {
+        } else if (colSet.has('session_id') && sessionId) {
           query += ` WHERE session_id = ?`;
-          params.push(opts.sessionId);
+          params.push(sessionId);
+        }
+
+        // Export incremental: o terminal pede o caminho a cada ~400 ms; reler e reescrever o
+        // transcript inteiro nesse ritmo castiga o disco (e o fsync é lento no ZimaOS).
+        const state = sessionExportState.get(jsonlPath);
+        const sameSession = state?.sessionId === sessionId;
+        if (
+          state &&
+          sameSession &&
+          colSet.has('seq') &&
+          existsSync(jsonlPath) &&
+          statSync(jsonlPath).size > 0
+        ) {
+          query += params.length ? ` AND seq > ?` : ` WHERE seq > ?`;
+          params.push(state.lastSeq);
+          incremental = true;
         }
         query += ` ORDER BY ${orderCol}`;
 
@@ -364,7 +399,9 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
 
   // Convert rows into TerminalEntry objects
   const allEntries: TerminalEntry[] = [];
-  let seq = 0;
+  // Contador de linhas já exportadas (os ids das entradas derivam dele, não do seq do banco:
+  // lacunas no seq fariam id repetido e o cliente descartaria a entrada nova).
+  let seq = incremental ? sessionExportState.get(jsonlPath)!.count : 0;
   for (const row of rows) {
     let payload: any = null;
     const rawData = row.entry_json || row.payload || row.data || row.event_json || row.content;
@@ -380,7 +417,21 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
 
   // Format each TerminalEntry as a JSON line and write out
   const lines = allEntries.map((e) => JSON.stringify(e)).join('\n');
-  writeFileSync(jsonlPath, lines ? `${lines}\n` : '', 'utf8');
+  if (lines) {
+    if (incremental) appendFileSync(jsonlPath, `${lines}\n`, 'utf8');
+    else writeFileSync(jsonlPath, `${lines}\n`, 'utf8');
+  } else if (!incremental) {
+    writeFileSync(jsonlPath, '', 'utf8');
+  }
+
+  const lastRowSeq = rows.length
+    ? Number(rows[rows.length - 1].seq ?? rows[rows.length - 1].rowid ?? seq)
+    : seq;
+  sessionExportState.set(jsonlPath, {
+    lastSeq: Number.isFinite(lastRowSeq) ? lastRowSeq : seq,
+    count: seq,
+    sessionId,
+  });
 
   return jsonlPath;
 }

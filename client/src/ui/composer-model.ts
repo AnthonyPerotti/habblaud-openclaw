@@ -111,6 +111,11 @@ export function sendStatusText(s: SendState | undefined, now: number, provider: 
 
 /** Consulta da entrega: o servidor leva até ~90 s para desistir (60 s na fila + 30 s sem confirmação). */
 export const POLL_LIMIT_MS = 120_000;
+/**
+ * No OpenClaw a entrega dura o turno inteiro (o Gateway cancela o run se o socket fechar), então
+ * "entregue" só chega no fim do turno: o prazo da consulta é o do turno, não o do plugin.
+ */
+export const OPENCLAW_POLL_LIMIT_MS = 15 * 60_000;
 
 /** Espera até a próxima consulta: rápida no começo (a sessão busca a cada 2 s), mais espaçada depois. */
 export function pollDelay(elapsed: number): number {
@@ -122,9 +127,17 @@ export function pollDelay(elapsed: number): number {
 export const LOST_ERROR = tr('o Habblaud não conhece mais esta mensagem (ele reiniciou?)');
 export const TIMEOUT_ERROR = tr('sem notícia da entrega: confira no terminal do Claude Code');
 export const CODEX_TIMEOUT_ERROR = tr('sem notícia da entrega: confira no Codex');
+export const OPENCLAW_TIMEOUT_ERROR = tr('entrega em andamento: o turno do OpenClaw ainda está rodando — acompanhe no terminal da sessão');
 export const OFFLINE_ERROR = tr('não foi possível falar com o Habblaud');
+
+/** Prazo da consulta até desistir, por provedor. */
+export function pollLimitMs(provider: Provider = 'claude'): number {
+  return provider === 'openclaw' ? OPENCLAW_POLL_LIMIT_MS : POLL_LIMIT_MS;
+}
 
 /** Prazo da consulta acabou sem notícia: onde conferir. */
 export function timeoutError(provider: Provider = 'claude'): string {
-  return provider === 'codex' ? CODEX_TIMEOUT_ERROR : TIMEOUT_ERROR;
+  if (provider === 'codex') return CODEX_TIMEOUT_ERROR;
+  if (provider === 'openclaw') return OPENCLAW_TIMEOUT_ERROR;
+  return TIMEOUT_ERROR;
 }

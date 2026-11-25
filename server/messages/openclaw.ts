@@ -18,6 +18,11 @@ import { tr } from '../../shared/i18n';
 
 export const DEFAULT_DELIVERY_TIMEOUT_MS = 15_000;
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2_500;
+/**
+ * Quanto esperar o stream do turno terminar. O turno do OpenClaw roda enquanto o socket HTTP estiver
+ * aberto: fechar antes cancela o run. 30 min cobre turno longo sem deixar o promise pendurado para sempre.
+ */
+export const DEFAULT_BODY_TIMEOUT_MS = 30 * 60_000;
 
 /** TLS errors that mean untrusted certificate, not a down server. */
 const CERTIFICATE_ERROR_CODES = new Set([
@@ -89,6 +94,8 @@ export interface OpenClawDeliveryClientOptions {
   gatewayUrl: string;
   token?: string;
   timeoutMs?: number;
+  /** Espera máxima pelo fim do stream do turno (padrão: 30 min). */
+  bodyTimeoutMs?: number;
   fetchFn?: typeof fetch;
   /** Defaults to being derived from sessionKey ("agent:main:x" -> "openclaw/main"). */
   model?: string;
@@ -261,6 +268,7 @@ export class OpenClawGatewayClient {
   private readonly allowInsecureFallback: boolean;
   private readonly model?: string;
   private readonly timeoutMs: number;
+  private readonly bodyTimeoutMs: number;
   private readonly retryDelaysMs: number[];
   private readonly _fetch?: typeof fetch;
   private reachable = false;
@@ -276,6 +284,7 @@ export class OpenClawGatewayClient {
     this.allowInsecureFallback = opts.allowInsecureFallback ?? false;
     this.model = opts.model;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
+    this.bodyTimeoutMs = opts.bodyTimeoutMs ?? DEFAULT_BODY_TIMEOUT_MS;
     this.retryDelaysMs = opts.retryDelaysMs ?? [250, 750];
     this._fetch = opts.fetchFn;
   }
@@ -289,9 +298,10 @@ export class OpenClawGatewayClient {
     headers: Record<string, string>,
     body: string | undefined,
     timeoutMs: number,
-  ): Promise<{ status: number; statusText: string; bodyText: string }> {
+    opts: { keepStream?: boolean } = {},
+  ): Promise<{ status: number; statusText: string; bodyText: string; aborted?: boolean }> {
     try {
-      return await this.requestWithTls(method, url, headers, body, timeoutMs);
+      return await this.requestWithTls(method, url, headers, body, timeoutMs, opts);
     } catch (err) {
       // OpenClaw self-signed cert has no SAN: even with the right CA, hostname verification fails.
       // Fall back to accepting the cert (read from the same OpenClaw dir) exactly once.
@@ -309,7 +319,7 @@ export class OpenClawGatewayClient {
         console.warn(
           `[openclaw] Gateway cert did not validate (${code}); connecting without cert verification to ${url}`,
         );
-        return this.requestWithTls(method, url, headers, body, timeoutMs);
+        return this.requestWithTls(method, url, headers, body, timeoutMs, opts);
       }
       throw err;
     }
@@ -325,24 +335,35 @@ export class OpenClawGatewayClient {
     headers: Record<string, string>,
     body: string | undefined,
     timeoutMs: number,
-  ): Promise<{ status: number; statusText: string; bodyText: string }> {
+    opts: { keepStream?: boolean } = {},
+  ): Promise<{ status: number; statusText: string; bodyText: string; aborted?: boolean }> {
     // No CA and not insecure: existing fetch path keeps unit tests working.
     if (!this.ca && !this.insecure) {
       const fetchFn = this._fetch ?? fetch;
-      const res = await fetchFn(url, {
-        method,
-        headers,
-        body,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      // Cabeçalhos têm o prazo curto (`timeoutMs`); o corpo do stream pode durar o turno inteiro.
+      const controller = new AbortController();
+      const headerTimer = setTimeout(() => controller.abort(), timeoutMs);
+      let res: Response;
+      try {
+        res = await fetchFn(url, { method, headers, body, signal: controller.signal });
+      } finally {
+        clearTimeout(headerTimer);
+      }
       const status = res.status;
-      // 2xx and GET have no useful body: discard to avoid waiting for the stream end.
-      if (method === 'GET' || (status >= 200 && status < 300)) {
+      // GET and error bodies are read; a 2xx answer is only discarded when the caller does not
+      // need the stream. For chat delivery the stream IS the turn: aborting it makes OpenClaw
+      // cancel the run (see deliver()).
+      if (method === 'GET') {
         res.body?.cancel().catch(() => {});
         return { status, statusText: res.statusText, bodyText: '' };
       }
-      const bodyText = await res.text().catch(() => '');
-      return { status, statusText: res.statusText, bodyText };
+      const bodyTimer = opts.keepStream ? setTimeout(() => controller.abort(), this.bodyTimeoutMs) : undefined;
+      try {
+        const bodyText = await res.text().catch(() => '');
+        return { status, statusText: res.statusText, bodyText };
+      } finally {
+        if (bodyTimer) clearTimeout(bodyTimer);
+      }
     }
 
     return await new Promise((resolve, reject) => {
@@ -364,18 +385,22 @@ export class OpenClawGatewayClient {
       const req = (isHttps ? httpsRequest : httpRequest)(u, options, (res) => {
         const status = res.statusCode ?? 0;
         const statusText = res.statusMessage ?? '';
-        if (method === 'GET' || (status >= 200 && status < 300)) {
+        if (method === 'GET' || (!opts.keepStream && (status < 200 || status >= 300))) {
           res.destroy();
           resolve({ status, statusText, bodyText: '' });
           return;
         }
         let bodyText = '';
         res.setEncoding('utf8');
+        // Depois dos cabeçalhos o relógio é o do corpo: um turno longo pode ficar minutos sem
+        // mandar nada e não pode ser confundido com servidor morto no timeout de conexão.
+        req.setTimeout(opts.keepStream ? this.bodyTimeoutMs : timeoutMs);
         res.on('data', (chunk: string) => {
           if (bodyText.length < 4096) bodyText += chunk;
         });
         res.on('end', () => resolve({ status, statusText, bodyText }));
         res.on('error', () => resolve({ status, statusText, bodyText }));
+        res.on('aborted', () => resolve({ status, statusText, bodyText, aborted: true }));
       });
 
       req.on('timeout', () => {
@@ -393,10 +418,11 @@ export class OpenClawGatewayClient {
     headers: Record<string, string>,
     body?: string,
     timeoutMs = this.timeoutMs,
-  ): Promise<{ status: number; statusText: string; bodyText: string }> {
+    opts: { keepStream?: boolean } = {},
+  ): Promise<{ status: number; statusText: string; bodyText: string; aborted?: boolean }> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.requestOnce(method, url, headers, body, timeoutMs);
+        return await this.requestOnce(method, url, headers, body, timeoutMs, opts);
       } catch (err) {
         const code =
           (err as { cause?: { code?: string } } | null)?.cause?.code ??
@@ -519,11 +545,15 @@ export class OpenClawGatewayClient {
     const targetUrl = this.activeGatewayUrl || this.gatewayUrl;
     const httpUrl = targetUrl.replace(/^ws(s?):\/\//, 'http$1://');
 
-    // 1. If WebSocket is requested and active, try WS transport first
-    if (this.gatewayUrl.startsWith('ws://') || this.gatewayUrl.startsWith('wss://')) {
-      const wsResult = await this.deliverViaWebSocket(job);
-      if (wsResult.ok) return wsResult;
-    }
+    // Transporte: só HTTP. A RPC `sessions.send` por WebSocket exigiria identidade de dispositivo
+    // assinada (sem ela o Gateway zera os escopos e recusa com `missing scope: operator.write`),
+    // então o caminho WS antigo só produzia falso positivo: qualquer quadro sem `error` — inclusive
+    // o `connect.challenge` — era lido como sucesso.
+    //
+    // O detalhe que importa: `/v1/chat/completions` amarra o turno ao socket do chamador. Se a
+    // resposta for descartada (conexão fechada) o Gateway registra `HTTP client disconnected` e
+    // aborta o run com `caller_signal_aborted` — o texto nunca entra na conversa. Por isso a
+    // entrega LÊ o stream SSE até o fim e só então responde.
 
     // 2. HTTP POST /v1/chat/completions with stream: true and model derived from sessionKey.
     // The Gateway requires the explicit agent when multiple agents are configured;
@@ -549,20 +579,27 @@ export class OpenClawGatewayClient {
     });
 
     try {
-      const res = await this.request('POST', `${httpUrl}/v1/chat/completions`, headers, body).catch(
-        async (err: unknown) => {
-          // Gateway host stopped resolving (Docker DNS blinking): re-discover the Gateway
-          // before giving up, instead of returning ENOTFOUND to the user.
-          const code =
-            (err as { cause?: { code?: string } } | null)?.cause?.code ??
-            (err as { code?: string } | null)?.code;
-          if (!code || !RETRYABLE_NETWORK_CODES.has(code)) throw err;
-          if (!(await this.checkReachable(true))) throw err;
-          const next = this.activeGatewayUrl.replace(/^ws(s?):\/\//, 'http$1://');
-          if (!next || next === httpUrl) throw err;
-          return this.request('POST', `${next}/v1/chat/completions`, headers, body);
-        },
-      );
+      const res = await this.request(
+        'POST',
+        `${httpUrl}/v1/chat/completions`,
+        headers,
+        body,
+        this.timeoutMs,
+        { keepStream: true },
+      ).catch(async (err: unknown) => {
+        // Gateway host stopped resolving (Docker DNS blinking): re-discover the Gateway
+        // before giving up, instead of returning ENOTFOUND to the user.
+        const code =
+          (err as { cause?: { code?: string } } | null)?.cause?.code ??
+          (err as { code?: string } | null)?.code;
+        if (!code || !RETRYABLE_NETWORK_CODES.has(code)) throw err;
+        if (!(await this.checkReachable(true))) throw err;
+        const next = this.activeGatewayUrl.replace(/^ws(s?):\/\//, 'http$1://');
+        if (!next || next === httpUrl) throw err;
+        return this.request('POST', `${next}/v1/chat/completions`, headers, body, this.timeoutMs, {
+          keepStream: true,
+        });
+      });
 
       if (res.status >= 200 && res.status < 300) {
         this.setReachable(true);
@@ -592,87 +629,6 @@ export class OpenClawGatewayClient {
     }
   }
 
-  /**
-   * WebSocket delivery implementation (sessions.send / operator.write).
-   */
-  private async deliverViaWebSocket(job: OpenClawDeliveryJob): Promise<OpenClawDeliveryResult> {
-    const WS = (globalThis as any).WebSocket;
-    if (!WS) {
-      return { ok: false, error: 'WebSocket not supported in runtime' };
-    }
-
-    return new Promise((resolve) => {
-      let resolved = false;
-      const done = (res: OpenClawDeliveryResult) => {
-        if (resolved) return;
-        resolved = true;
-        try { ws.close(); } catch { /* ignore */ }
-        resolve(res);
-      };
-
-      const timer = setTimeout(() => {
-        done({ ok: false, error: tr('o Gateway do OpenClaw não respondeu via WebSocket a tempo') });
-      }, this.timeoutMs);
-
-      let ws: any;
-      try {
-        const headers: Record<string, string> = {};
-        if (this.token) headers.Authorization = `Bearer ${this.token}`;
-        ws = new WS(this.gatewayUrl);
-      } catch (err) {
-        clearTimeout(timer);
-        return done({ ok: false, error: sanitizeError(err, this.token) });
-      }
-
-      ws.onopen = () => {
-        const rpcPayload = {
-          type: 'req',
-          id: `msg-${Date.now()}`,
-          method: 'sessions.send',
-          params: {
-            sessionKey: job.sessionKey,
-            message: job.text,
-            queueMode: 'followup',
-          },
-        };
-        try {
-          ws.send(JSON.stringify(rpcPayload));
-        } catch (sendErr) {
-          clearTimeout(timer);
-          done({ ok: false, error: sanitizeError(sendErr, this.token) });
-        }
-      };
-
-      ws.onmessage = (event: any) => {
-        try {
-          const data = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
-          if (data && (data.ok === true || data.result !== undefined || !data.error)) {
-            clearTimeout(timer);
-            this.setReachable(true);
-            done({ ok: true });
-          } else {
-            clearTimeout(timer);
-            done({ ok: false, error: data?.error?.message || tr('erro ao enviar mensagem no OpenClaw Gateway') });
-          }
-        } catch {
-          clearTimeout(timer);
-          done({ ok: true });
-        }
-      };
-
-      ws.onerror = (err: any) => {
-        clearTimeout(timer);
-        done({ ok: false, error: sanitizeError(err?.message || 'WebSocket connection error', this.token) });
-      };
-
-      ws.onclose = () => {
-        clearTimeout(timer);
-        if (!resolved) {
-          done({ ok: false, error: tr('conexão WebSocket com o OpenClaw Gateway encerrada antes da confirmação') });
-        }
-      };
-    });
-  }
 }
 
 /**
