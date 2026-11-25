@@ -330,6 +330,8 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
   /** Último `seq` lido: só as linhas novas são acrescentadas ao JSONL. */
   let lastSeq = 0;
   let incremental = false;
+  /** Algum banco legível com `transcript_events` foi lido neste sync? */
+  let read = false;
 
   for (const dbPath of candidates) {
     if (!existsSync(dbPath)) continue;
@@ -386,6 +388,7 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
         query += ` ORDER BY ${orderCol}`;
 
         rows = db.prepare(query).all(...params) as Array<Record<string, unknown>>;
+        read = true;
         break;
       }
     } catch {
@@ -416,6 +419,10 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
   }
 
   // Format each TerminalEntry as a JSON line and write out
+  // Nenhum banco legível (WAL em transição, arquivo sumido): não mexe no arquivo nem no cursor —
+  // apagar o JSONL aqui faria o terminal perder a conversa que já estava na tela.
+  if (!read) return jsonlPath;
+
   const lines = allEntries.map((e) => JSON.stringify(e)).join('\n');
   if (lines) {
     if (incremental) appendFileSync(jsonlPath, `${lines}\n`, 'utf8');
@@ -424,14 +431,19 @@ export function syncOpenClawTranscript(opts: SyncTranscriptOptions): string | un
     writeFileSync(jsonlPath, '', 'utf8');
   }
 
-  const lastRowSeq = rows.length
-    ? Number(rows[rows.length - 1].seq ?? rows[rows.length - 1].rowid ?? seq)
-    : seq;
-  sessionExportState.set(jsonlPath, {
-    lastSeq: Number.isFinite(lastRowSeq) ? lastRowSeq : seq,
-    count: seq,
-    sessionId,
-  });
+  // O cursor só avança com linha lida de verdade. Leitura vazia (banco momentaneamente ilegível,
+  // WAL em transição) não pode empurrar o `lastSeq` para frente: a linha pulada nunca mais seria
+  // exportada — foi assim que uma mensagem do usuário sumiu do terminal.
+  if (rows.length) {
+    const lastRowSeq = Number(rows[rows.length - 1].seq ?? rows[rows.length - 1].rowid ?? 0);
+    sessionExportState.set(jsonlPath, {
+      lastSeq: Number.isFinite(lastRowSeq) ? lastRowSeq : 0,
+      count: seq,
+      sessionId,
+    });
+  } else if (!incremental) {
+    sessionExportState.set(jsonlPath, { lastSeq: 0, count: seq, sessionId });
+  }
 
   return jsonlPath;
 }

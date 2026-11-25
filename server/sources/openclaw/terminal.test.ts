@@ -164,3 +164,64 @@ describe('OpenClaw Terminal — transcript_events to JSONL fixture test', () => 
   });
 });
 
+
+describe('OpenClaw Terminal — export incremental', () => {
+  /** Banco mínimo no formato do OpenClaw 2026.11 (com `seq`, que o export usa como cursor). */
+  function makeDb(dir: string, rows: Array<{ seq: number; content: string; role: 'user' | 'assistant' }>): string {
+    mkdirSync(join(dir, 'agents', 'main', 'agent'), { recursive: true });
+    const dbPath = join(dir, 'agents', 'main', 'agent', 'openclaw-agent.sqlite');
+    const db = new (DatabaseSync as any)(dbPath);
+    db.exec(`CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, created_at INTEGER);`);
+    for (const r of rows) {
+      db.exec(
+        `INSERT INTO transcript_events VALUES ('sid-inc', ${r.seq}, '${JSON.stringify({
+          type: 'message',
+          message: { role: r.role, content: r.content },
+          timestamp: 1700000000000 + r.seq,
+        })}', ${1700000000000 + r.seq});`,
+      );
+    }
+    db.close();
+    return dbPath;
+  }
+
+  function linesOf(path: string): any[] {
+    return readFileSync(path, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+  }
+
+  it('acrescenta só as linhas novas sem reescrever o transcript inteiro', () => {
+    if (!DatabaseSync) return; // skip on old Node
+
+    const dir = join(tmpBase, 'agent-incremental');
+    rmSync(dir, { recursive: true, force: true });
+    makeDb(dir, [
+      { seq: 0, role: 'user', content: 'primeira' },
+      { seq: 1, role: 'assistant', content: 'segunda' },
+    ]);
+    const key = 'agent:main:dashboard:incremental';
+    const opts = { openclawHome: dir, agentId: 'main', sessionKey: key, sessionId: 'sid-inc' };
+
+    const path = syncOpenClawTranscript(opts)!;
+    expect(linesOf(path).map((e) => e.text)).toEqual(['primeira', 'segunda']);
+
+    // Sem novidade no banco: o arquivo não pode ser reescrito nem duplicar linhas.
+    const before = readFileSync(path, 'utf8');
+    const path2 = syncOpenClawTranscript(opts)!;
+    expect(readFileSync(path2, 'utf8')).toBe(before);
+
+    // Linha nova: entra no fim, e só ela.
+    const db = new (DatabaseSync as any)(join(dir, 'agents', 'main', 'agent', 'openclaw-agent.sqlite'));
+    db.exec(`INSERT INTO transcript_events VALUES ('sid-inc', 2, '${JSON.stringify({
+      type: 'message',
+      message: { role: 'user', content: 'terceira' },
+      timestamp: 1700000000002,
+    })}', 1700000000002);`);
+    db.close();
+
+    const path3 = syncOpenClawTranscript(opts)!;
+    expect(linesOf(path3).map((e) => e.text)).toEqual(['primeira', 'segunda', 'terceira']);
+  });
+});
